@@ -1,4 +1,4 @@
-.PHONY: all build test live lint fmt check
+.PHONY: all build test live lint fmt check diagrams
 
 all: build
 
@@ -23,3 +23,7 @@ fmt:
 	cargo fmt
 
 check: lint test
+
+# Every docs/media/*.d2 to an SVG beside it. TALA is d2's layout engine for architecture diagrams.
+diagrams:
+	@for f in docs/media/*.d2; do d2 --layout=tala "$$f" "$${f%.d2}.svg" || exit 1; done

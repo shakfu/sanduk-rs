@@ -134,6 +134,17 @@ impl ContainerSpec {
     }
 }
 
+/// Where a probe runs from: a container already on the network, or a short one started for it.
+#[derive(Debug, Clone, Copy)]
+pub enum Via<'a> {
+    Holder(&'a str),
+    Container {
+        name: &'a str,
+        network: &'a str,
+        image: &'a str,
+    },
+}
+
 /// A network's gateway, the address the relay binds, and its subnet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Network {
@@ -667,6 +678,46 @@ impl Engine {
             ));
         }
         Ok(Some(spec.name))
+    }
+
+    /// Whether `url` answers 204 from inside a network: through `via`, with curl, which every
+    /// shipped image carries. A host firewall that drops the connection makes this false within
+    /// `timeout` seconds, where the agent would have hung until its own deadline.
+    pub fn probe(&self, via: &Via, url: &str, timeout: u32) -> Result<bool> {
+        let curl = [
+            "-s".to_string(),
+            "-o".into(),
+            "/dev/null".into(),
+            "-w".into(),
+            "%{http_code}".into(),
+            "--max-time".into(),
+            timeout.to_string(),
+            url.to_string(),
+        ];
+        let argv = match via {
+            Via::Holder(holder) => {
+                let mut argv = self.argv(&["exec", holder, "curl"]);
+                argv.extend(curl);
+                argv
+            }
+            Via::Container {
+                name,
+                network,
+                image,
+            } => self.run_argv(&ContainerSpec {
+                cpus: 1,
+                memory: "256M".into(),
+                network: Some(network.to_string()),
+                entrypoint: Some("curl".into()),
+                command: curl.to_vec(),
+                ..ContainerSpec::new(*name, *image)
+            }),
+        };
+        let r = self.exec.run(&argv, true);
+        if let Via::Container { name, .. } = via {
+            self.destroy(name)?;
+        }
+        Ok(r.stdout.trim() == "204")
     }
 
     // --- containers --------------------------------------------------------------------------

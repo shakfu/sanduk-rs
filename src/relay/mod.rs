@@ -87,6 +87,9 @@ fn refusal_kind(status: u16) -> &'static str {
     }
 }
 
+/// The path `run` probes to learn the relay is reachable from inside the container's network.
+pub const PING: &str = "/_sanduk/ping";
+
 /// Where the relay reports what it does, one line at a time.
 pub type Note = Arc<dyn Fn(&str) + Send + Sync>;
 
@@ -345,6 +348,13 @@ async fn relay(state: Arc<State>, peer: SocketAddr, req: Request<Incoming>) -> R
             .path_and_query()
             .map_or_else(|| "/".into(), |pq| pq.to_string()),
     };
+    // Reachability, for `run` to test the path before the agent starts. No token, nothing counted
+    // or logged, and nothing in the answer.
+    if req.method() == Method::GET && req.uri().path() == PING {
+        let mut response = Response::new(RelayBody::Full(None));
+        *response.status_mut() = StatusCode::NO_CONTENT;
+        return response;
+    }
     let presented = req
         .headers()
         .get(cfg.provider.auth_header)

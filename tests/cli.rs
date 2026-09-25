@@ -811,3 +811,69 @@ fn telling_an_unknown_assistant_is_an_error_and_empty_listings_are_not() {
     assert!(stderr(&w.sanduk(&["runs"])).contains("no wakeups recorded"));
     assert!(stderr(&w.sanduk(&["assistant", "list"])).contains("no assistants registered"));
 }
+
+// --- the relay probe --------------------------------------------------------------------------------
+
+/// A sealed run probes the relay from inside the network before the agent starts, and the probe's
+/// container goes with the run.
+#[test]
+fn a_sealed_run_probes_the_relay_first() {
+    let w = World::new("probe-ok");
+    w.agent(&say(RESULT));
+    let out = w.run(&["--mode", "sealed"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let calls = w.calls();
+    let probe = calls
+        .iter()
+        .position(|c| c[0] == "run" && c.contains(&"curl".to_string()))
+        .expect("a probe");
+    let agent = calls
+        .iter()
+        .position(|c| c[0] == "run" && !c.contains(&"curl".to_string()))
+        .expect("the agent");
+    assert!(probe < agent, "the probe runs before the agent");
+    assert!(calls[probe].last().unwrap().ends_with("/_sanduk/ping"));
+    assert_eq!(w.containers(), "");
+}
+
+/// A firewall that drops the container's connection: the run stops in seconds with the likely
+/// cause, where the agent would have hung until --timeout, and gives back everything it held.
+#[test]
+fn a_run_whose_container_cannot_reach_the_relay_stops_before_the_agent() {
+    let w = World::new("probe-fail");
+    w.agent(&say(RESULT));
+    let work = w.work();
+    let out = w
+        .command(&[
+            "run",
+            "task",
+            "-w",
+            &work,
+            "--agent",
+            "claude",
+            "--provider",
+            "anthropic",
+            "--runtime",
+            "docker",
+            "--skip-key-check",
+            "--mode",
+            "sealed",
+        ])
+        .env("FAKE_DOCKER_PROBE_FAIL", "1")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let err = stderr(&out);
+    assert!(
+        err.contains("is not reachable from sanduk-net") && err.contains("likely cause"),
+        "{err}"
+    );
+    assert!(
+        !w.calls()
+            .iter()
+            .any(|c| c[0] == "run" && !c.contains(&"curl".to_string())),
+        "the agent ran"
+    );
+    assert_eq!(w.containers(), "");
+    assert_eq!(w.records(), 0);
+}

@@ -63,11 +63,11 @@ case "$1" in
     grep -v "^$2	" "$containers" > "$containers.tmp"; mv "$containers.tmp" "$containers" ;;
   run)
     shift
-    name=""; image=""; detach=""; work=""
+    name=""; image=""; detach=""; work=""; entrypoint=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --name|--cpus|--memory|--cap-drop|--security-opt|--pids-limit|--user|-w|-e|--network|--entrypoint|--runtime|--mount)
-          [ "$1" = --name ] && name="$2"; shift 2 ;;
+          [ "$1" = --name ] && name="$2"; [ "$1" = --entrypoint ] && entrypoint="$2"; shift 2 ;;
         -v) work="${2%%:*}"; shift 2 ;;
         -d) detach=1; shift ;;
         --init|-i|--rm|-it) shift ;;
@@ -76,6 +76,13 @@ case "$1" in
     done
     set_state "$name" "$image" running
     [ -n "$detach" ] && exit 0
+    # An entrypoint other than the image's: the relay probe's curl, run here for real. A firewall
+    # that drops the connection is $FAKE_DOCKER_PROBE_FAIL: curl's timeout, and no status.
+    if [ -n "$entrypoint" ]; then
+      if [ -n "${FAKE_DOCKER_PROBE_FAIL:-}" ]; then printf 000; code=28; else "$entrypoint" "$@"; code=$?; fi
+      set_state "$name" "$image" exited
+      exit $code
+    fi
     # The agent: $FAKE_AGENT, given the workdir and its own argv.
     FAKE_WORK="$work" "${FAKE_AGENT:?}" "$@"
     code=$?

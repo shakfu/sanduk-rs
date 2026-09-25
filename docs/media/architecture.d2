@@ -1,0 +1,82 @@
+# sanduk-rs architecture. Regenerate with `make diagrams`.
+
+direction: right
+
+host: Host {
+  cli: sanduk CLI {
+    shape: rectangle
+    run: "run · build · ps · clean · destroy"
+    assist: "assistant · tell · tick · serve · outbox"
+  }
+
+  config: Configuration {
+    agents: "agents/*.toml\nwiring · argv · checks"
+    recipes: "recipes/*.json + kits\npinned by sha256"
+  }
+
+  streams: "stream readers\nclaude · codex · hax · hermes\nminima · opencode · pi"
+
+  relay: Relay {
+    shape: rectangle
+    policy: "run token → API key\nexact paths · model allowlist\ntoken cap · budget"
+  }
+
+  state: State {
+    runs: "run records\n(~/.local/state/sanduk/runs)" {shape: cylinder}
+    db: "assistants.db\n(SQLite)" {shape: cylinder}
+  }
+
+  container_crate: sanduk-container {
+    style.fill: "#e8f0fe"
+  }
+
+  engine: "Engine CLI\ncontainer (Apple) · docker"
+
+  cli -> config: reads
+  cli -> container_crate: specs
+  container_crate -> engine: argv
+  cli -> relay: starts, stops
+  cli -> state: claims, sweeps
+  cli -> streams: agent stdout
+}
+
+vm: "Container (a VM on Apple's engine)" {
+  style.stroke-dash: 3
+  agent: "Agent\nholds a run token only"
+  work: "/work\nbind mount"
+  agent -> work: writes REPORT.md
+}
+
+net: "sanduk-net\ninternal: no route off the host" {
+  shape: queue
+}
+
+provider: Provider {
+  shape: cloud
+  label: "Provider\nAnthropic · OpenAI · OpenRouter\nllama-server"
+}
+
+host.engine -> vm: creates, deletes
+vm.agent -> net
+net -> host.relay: "only route out\n(bridge gateway)"
+host.relay -> provider: "real key, TLS"
+
+sandbox: sanduk-sandbox {
+  style.fill: "#e6f4ea"
+  policy: "writes: root, \$TMPDIR, caches\nLandlock (Linux) · Seatbelt (macOS)"
+}
+
+users: Uses sanduk-sandbox {
+  minima: "minima\nbash tool, --sandbox"
+  pma: "pma verify\n(planned)" {
+    style.stroke-dash: 3
+  }
+  timu: "timu shell tool\n(planned)" {
+    style.stroke-dash: 3
+  }
+}
+
+users.minima -> sandbox: links
+users.pma -> sandbox: {style.stroke-dash: 3}
+users.timu -> sandbox: {style.stroke-dash: 3}
+users.pma -> host.container_crate: "(planned)" {style.stroke-dash: 3}

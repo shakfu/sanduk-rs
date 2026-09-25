@@ -745,3 +745,60 @@ fn service_status_answers_rather_than_failing() {
     let e = Engine::with_exec(Kind::Docker, fake);
     assert!(e.service_status().contains("not found on PATH"));
 }
+
+// --- probe ----------------------------------------------------------------------------------------
+
+use sanduk_container::Via;
+
+/// Apple's engine already has the holder on the network: the probe runs in it, with no new VM.
+#[test]
+fn a_probe_runs_in_the_holder_where_there_is_one() {
+    let (e, fake) = engine(Kind::Apple, 0, "204");
+    assert!(
+        e.probe(
+            &Via::Holder("sanduk-hold-ab"),
+            "http://10.0.0.1:9/_sanduk/ping",
+            5
+        )
+        .unwrap()
+    );
+    let argv = &calls(&fake)[0];
+    assert_eq!(argv[..4], ["container", "exec", "sanduk-hold-ab", "curl"]);
+    assert_eq!(argv.last().unwrap(), "http://10.0.0.1:9/_sanduk/ping");
+    assert_eq!(after(argv, "--max-time"), "5");
+}
+
+/// Docker needs no holder, so the probe is a short container on the network, deleted after.
+#[test]
+fn a_probe_without_a_holder_is_a_container_on_the_network_deleted_after() {
+    let (e, fake) = engine(Kind::Docker, 0, "204\n");
+    let via = Via::Container {
+        name: "sanduk-probe-1",
+        network: "sanduk-net",
+        image: "img",
+    };
+    assert!(e.probe(&via, "http://10.0.0.1:9/_sanduk/ping", 5).unwrap());
+    let calls = calls(&fake);
+    assert_eq!(after(&calls[0], "--entrypoint"), "curl");
+    assert_eq!(after(&calls[0], "--network"), "sanduk-net");
+    assert!(has(&calls[0], "--cap-drop"), "hardened like any container");
+    assert_eq!(
+        calls[1..],
+        [
+            ["docker", "stop", "sanduk-probe-1"],
+            ["docker", "rm", "sanduk-probe-1"]
+        ]
+    );
+}
+
+/// curl prints 000 when the connection never completes: a dropped packet, or a refusal.
+#[test]
+fn a_probe_that_gets_no_204_is_false() {
+    for stdout in ["000", "401", ""] {
+        let (e, _) = engine(Kind::Apple, 28, stdout);
+        assert!(
+            !e.probe(&Via::Holder("h"), "http://x/", 5).unwrap(),
+            "{stdout:?}"
+        );
+    }
+}

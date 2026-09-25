@@ -50,7 +50,7 @@ sha2 = "0.10"
 clap = { version = "4", features = ["derive", "wrap_help"] }
 # Recipe validation: every value that reaches a shell is matched against a character set.
 regex = "1"
-sanduk-container = { path = "crates/sanduk-container" }
+sanduk-container = { path = "crates/sanduk-container", version = "0.1.0" }
 # Assistant state. Bundled: the schema is Python sanduk's, and a system SQLite is not a given.
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 

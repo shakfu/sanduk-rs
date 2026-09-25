@@ -8,6 +8,8 @@ Agent container and sandbox management in Rust: a rewrite of [sanduk](https://gi
 | [`sanduk-container`](crates/sanduk-container) | Drives a container engine's CLI: Apple's `container`, Docker | -- |
 | `sanduk` | The CLI, agents, recipes, kits, providers and the relay | -- |
 
+![sanduk-rs architecture](docs/media/architecture.svg)
+
 The two tiers cover different threats:
 
 - `sanduk-sandbox` stops a model that errs from writing outside the project. Reads and the network stay open, so it does not contain an adversarial prompt.
@@ -62,6 +64,7 @@ Agents are TOML files: see [docs/agents.md](docs/agents.md).
 make test    # cargo test
 make lint    # fmt --check, clippy -D warnings
 make live    # needs the network: a real container engine, and one relayed call over TLS
+make diagrams  # docs/media/*.d2 to SVG, with d2 --layout=tala
 ```
 
 The Linux backend is tested only on a Linux host with Landlock. CI runs both platforms.

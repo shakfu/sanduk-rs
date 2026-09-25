@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use clap::Args;
 use regex::Regex;
 
-use sanduk_container::{CONTAINER_PREFIX, ContainerSpec, Engine, Mount, wait_for_gateway};
+use sanduk_container::{CONTAINER_PREFIX, ContainerSpec, Engine, Mount, Via, wait_for_gateway};
 
 use super::{EngineArgs, ImageArgs};
 use crate::agent::launch::{Signals, launch};
@@ -23,7 +23,7 @@ use crate::error::{Error, Result};
 use crate::preflight::{firewall_warning, validate_key};
 use crate::providers::{DEFAULT_PROVIDER, Provider, Scheme, get_provider, parse_upstream};
 use crate::recipes::{self, Recipe, Rendered};
-use crate::relay::{Config, Relay};
+use crate::relay::{Config, PING, Relay};
 use crate::runs::{self, Run, claim};
 use crate::util::{copy_unfollowed, note, open_unfollowed, random_hex, seconds, shell_join, token};
 
@@ -1043,6 +1043,14 @@ pub fn run(args: RunArgs) -> Result<i32> {
                 let relay = start_relay(&args, &sel, &key, &run_token, &gateway, &name)?;
                 port = relay.port();
                 held.relay = Some(relay);
+                probe_relay(
+                    &engine,
+                    &mut held,
+                    &mode.network,
+                    &sel.image.tag,
+                    &gateway,
+                    port,
+                )?;
             }
         }
         let root = if mode.relayed {
@@ -1216,6 +1224,62 @@ pub fn run(args: RunArgs) -> Result<i32> {
         note(&o.stats);
     }
     collect_report(&args, &workdir, outcome.as_ref(), rc, &failure)
+}
+
+/// How long the probe waits for the relay. A reachable relay answers in milliseconds.
+const PROBE_SECONDS: u32 = 5;
+
+/// Refuses a run whose container could not reach the relay: its first call would hang until
+/// `--timeout`. Through the holder where there is one; otherwise a short container, recorded first
+/// so a killed run's sweep deletes it. See docs/dev/firewall-considerations.md.
+fn probe_relay(
+    engine: &Engine,
+    held: &mut Held,
+    network: &str,
+    image: &str,
+    gateway: &str,
+    port: u16,
+) -> Result<()> {
+    let url = format!("http://{gateway}:{port}{PING}");
+    let reached = match &held.holder {
+        Some(holder) => engine.probe(&Via::Holder(holder), &url, PROBE_SECONDS)?,
+        None => {
+            let name = format!("{CONTAINER_PREFIX}probe-{}", random_hex(6)?);
+            if let Some(record) = held.record.as_mut() {
+                record.add(&name)?;
+            }
+            engine.probe(
+                &Via::Container {
+                    name: &name,
+                    network,
+                    image,
+                },
+                &url,
+                PROBE_SECONDS,
+            )?
+        }
+    };
+    if reached {
+        return Ok(());
+    }
+    let likely = match std::env::consts::OS {
+        "macos" => {
+            let exe = std::env::current_exe()
+                .map_or_else(|_| "sanduk".into(), |p| p.display().to_string());
+            format!(
+                "The macOS firewall is the likely cause. Answer its prompt, or allow this binary once: \
+                 sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add {exe}"
+            )
+        }
+        _ => format!(
+            "A host firewall is the likely cause: allow incoming connections from the container network's \
+             bridge interface to port {port}, e.g. `sudo ufw allow in on <bridge>`"
+        ),
+    };
+    Err(Error::new(format!(
+        "the relay at {gateway}:{port} is not reachable from {network}, so the agent's first call would \
+         hang until --timeout. {likely}"
+    )))
 }
 
 /// Binds the relay to the bridge address only: unreachable from Wi-Fi or the LAN.

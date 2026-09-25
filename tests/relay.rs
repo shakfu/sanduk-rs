@@ -1094,3 +1094,22 @@ fn a_call_the_client_leaves_before_its_headers_is_still_counted() {
         "billed work went uncounted"
     );
 }
+
+/// `run` probes this before the agent starts. It needs no token, and a probe is neither a relayed
+/// call nor a rejection.
+#[test]
+fn the_ping_answers_without_a_token_and_is_not_counted() {
+    let up = ok();
+    let (relay, notes) = relay(A, &up, |c| c);
+    let mut conn = Conn::open(relay.port());
+    conn.send("GET", sanduk::relay::PING, &[], None);
+    let reply = conn.read_reply();
+    assert_eq!(reply.status, 204);
+    assert!(reply.body.is_empty());
+    assert_eq!(relay.stats(), sanduk::relay::Stats::default());
+    assert!(notes.lock().unwrap().is_empty());
+    assert_eq!(up.calls(), 0);
+    // Only a GET: anything else there is an ordinary request, refused without the token.
+    let refused = call_with(relay.port(), sanduk::relay::PING, &[], Some(b"{}"));
+    assert_eq!(refused.status, 401);
+}
