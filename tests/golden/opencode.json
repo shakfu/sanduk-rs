@@ -1,0 +1,50 @@
+{
+  "files": {},
+  "tags": {
+    "none": "sanduk-opencode:e33928040202",
+    "uid1001": "sanduk-opencode:10b6910cb8fd"
+  },
+  "resolved": {
+    "name": "opencode",
+    "agent": "opencode",
+    "from": "docker.io/library/node:22-slim",
+    "user": "node",
+    "home": "/home/node",
+    "sections": [
+      {
+        "name": "base-tools",
+        "type": "apt",
+        "install": [
+          "git",
+          "ripgrep",
+          "ca-certificates",
+          "curl",
+          "jq",
+          "python3"
+        ]
+      },
+      {
+        "name": "agent",
+        "type": "npm",
+        "install": [
+          "opencode-ai@1.18.29"
+        ]
+      },
+      {
+        "name": "drivers",
+        "type": "npm",
+        "description": "fetched at run time otherwise, which sealed has no route for",
+        "install": [
+          "@ai-sdk/openai-compatible@3.0.48",
+          "@ai-sdk/anthropic@4.0.53"
+        ]
+      }
+    ],
+    "kits": [],
+    "env": {},
+    "entrypoint": [
+      "opencode"
+    ],
+    "instructions": []
+  }
+}

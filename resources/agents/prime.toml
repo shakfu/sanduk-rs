@@ -1,0 +1,46 @@
+# PrimeIntellect's `prime-agent`: pi's CLI in another build, so its flags, stream and models.json
+# are pi's. What differs is the command, the config directory, the variable names, how the key is
+# referenced, and one flag.
+name = "prime"
+description = "prime-agent, a build of pi; speaks all three protocols"
+recipe = "prime"
+# pi reads ~/.agents/skills; whether this build does is not measured, so kits with skills are refused.
+# In PRIME_AGENT_CODING_AGENT_DIR, which the recipe sets to ~/.prime/agent.
+instructions_file = ".prime/agent/AGENTS.md"
+protocols = ["anthropic-messages", "openai-chat", "openai-responses"]
+stream = "pi"
+
+argv = [
+  "--print", "--mode", "json",
+  "--no-session",
+  # 0.9.5 has no --no-approve, so a .prime/agent/settings.json in the mounted directory is read.
+  # That steers the run; it does not widen the box, which is the container and the relay.
+  "--model", "sanduk/{model}",
+  "--",
+  "{task}",
+]
+
+[check]
+require = ["model"]
+
+[vars.api]
+from = "protocol"
+map = { "anthropic-messages" = "anthropic-messages", "openai-chat" = "openai-completions", "openai-responses" = "openai-responses" }
+
+[vars.prefix]
+from = "protocol"
+map = { "anthropic-messages" = "", "*" = "{api_prefix}" }
+
+[wire]
+key_env = "PRIME_RELAY_KEY"
+base_url_env = "PRIME_RELAY_BASE_URL"
+base_url = "{endpoint}{prefix}"
+
+[wire.env.SANDUK_MODELS_JSON.json.providers.sanduk]
+name = "sanduk relay"
+baseUrl = "{base_url}"
+api = "{api}"
+# A bare variable name, where pi takes $NAME. Measured against 0.9.4 with a stub upstream:
+# `$PRIME_RELAY_KEY` arrived as the literal string, and `PRIME_RELAY_KEY` as the variable's value.
+apiKey = "{key_env}"
+models = [{ id = "{model}" }]

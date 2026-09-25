@@ -1,0 +1,54 @@
+{
+  "files": {
+    "skills/docs/d2/SKILL.md": "d314a525e71f2180d7d00cd51d4ad9ef58fe35d184a365c48817b060d27e1ad3"
+  },
+  "tags": {
+    "none": "sanduk-claude-docs:3743bfb19fde",
+    "uid1001": "sanduk-claude-docs:4287e0e9e47c"
+  },
+  "resolved": {
+    "name": "claude-docs",
+    "agent": "claude",
+    "from": "docker.io/library/node:22-slim",
+    "user": "node",
+    "home": "/home/node",
+    "sections": [
+      {
+        "name": "base-tools",
+        "type": "apt",
+        "install": [
+          "git",
+          "ripgrep",
+          "ca-certificates",
+          "curl",
+          "jq",
+          "python3"
+        ]
+      },
+      {
+        "name": "agent",
+        "type": "npm",
+        "install": [
+          "@anthropic-ai/claude-code@2.1.272"
+        ]
+      }
+    ],
+    "kits": [
+      {
+        "name": "docs",
+        "sha256": "7ad96f7cbe10f0824cce2b84aeb820ffb7eb3f496873e2dc22969456eeb79d67",
+        "pinned": true
+      }
+    ],
+    "env": {
+      "DISABLE_AUTOUPDATER": "1",
+      "DISABLE_TELEMETRY": "1",
+      "DISABLE_ERROR_REPORTING": "1",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+    },
+    "entrypoint": [
+      "claude"
+    ],
+    "instructions": []
+  }
+}

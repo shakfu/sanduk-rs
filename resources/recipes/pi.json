@@ -1,0 +1,36 @@
+{
+  "name": "pi",
+  "description": "pi on node:22-slim; the entrypoint writes models.json from the environment",
+  "agent": "pi",
+  "from": "docker.io/library/node:22-slim",
+  "user": "node",
+  "home": "/home/node",
+  "sections": [
+    {
+      "name": "base-tools",
+      "type": "apt",
+      "install": ["git", "ripgrep", "ca-certificates", "curl", "jq", "python3"]
+    },
+    {
+      "name": "agent",
+      "type": "npm",
+      "description": "--ignore-scripts is what pi's own containerization doc installs with",
+      "flags": ["--ignore-scripts"],
+      "install": ["@earendil-works/pi-coding-agent@0.85.1"]
+    },
+    {
+      "name": "entrypoint",
+      "type": "copy",
+      "from": "files/sanduk-pi",
+      "to": "/usr/local/bin/sanduk-pi",
+      "mode": "0755"
+    }
+  ],
+  "env": {
+    "PI_CODING_AGENT_DIR": "/home/node/.pi/agent",
+    "PI_OFFLINE": "1",
+    "PI_SKIP_VERSION_CHECK": "1",
+    "PI_TELEMETRY": "0"
+  },
+  "entrypoint": ["sanduk-pi"]
+}

@@ -1,0 +1,39 @@
+# OpenAI's `codex exec --json`. It speaks the Responses API and nothing else, and learns its
+# endpoint from config keys overridden per run with -c, not from a variable.
+name = "codex"
+description = "OpenAI codex; speaks OpenAI Responses only"
+recipe = "codex"
+skills_dir = ".agents/skills"
+# $CODEX_HOME/AGENTS.md. --ignore-user-config drops config.toml, not this file.
+instructions_file = ".codex/AGENTS.md"
+protocols = ["openai-responses"]
+stream = "codex"
+
+argv = [
+  "exec", "--json",
+  # The container is the boundary; codex's own sandbox inside it would only stop the agent doing
+  # the work it was given.
+  "--sandbox", "danger-full-access",
+  # A stray config would be a second source of truth for the endpoint.
+  "--ignore-user-config",
+  # The bind mount is usually not a repository, and codex refuses an untrusted directory.
+  "--skip-git-repo-check",
+  # -c values are TOML; |json quotes a string the way TOML reads it.
+  "-c", 'model_provider="sanduk"',
+  "-c", 'model_providers.sanduk.name="sanduk relay"',
+  "-c", "model_providers.sanduk.base_url={base_url|json}",
+  "-c", "model_providers.sanduk.env_key={key_env|json}",
+  "-c", 'model_providers.sanduk.wire_api="responses"',
+  { args = ["--model", "{model}"] },
+  "{task}",
+]
+
+[wire]
+key_env = "CODEX_RELAY_KEY"
+# Named for --dry-run to print; codex reads the endpoint from the -c override above.
+base_url_env = "CODEX_RELAY_BASE_URL"
+base_url = "{endpoint}{api_prefix}"
+
+[wire.env]
+# No route off the relay's network, so an update check can only stall the run.
+CODEX_DISABLE_UPDATE_CHECK = "1"

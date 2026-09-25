@@ -1,0 +1,13 @@
+#!/bin/sh
+# As sanduk-pi: prime-agent reads its endpoint from models.json in its config
+# directory, written here from the environment rather than the bind mount.
+set -e
+if [ -n "$SANDUK_MODELS_JSON" ]; then
+  mkdir -p "$PRIME_AGENT_CODING_AGENT_DIR"
+  printf %s "$SANDUK_MODELS_JSON" > "$PRIME_AGENT_CODING_AGENT_DIR/models.json"
+fi
+# Each fresh container installs prime's built-in Python skills with uv. With no
+# route to the index, uv retries for ~6 minutes. -e UV_OFFLINE=0 re-enables it.
+: "${UV_OFFLINE:=1}"
+export UV_OFFLINE
+exec prime-agent "$@"

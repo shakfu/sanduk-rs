@@ -1,0 +1,33 @@
+{
+  "name": "hax",
+  "description": "hax, a static musl binary, on debian:trixie-slim with no Node",
+  "agent": "hax",
+  "from": "docker.io/library/debian:trixie-slim",
+  "user": "agent",
+  "home": "/home/agent",
+  "sections": [
+    {
+      "name": "base-tools",
+      "type": "apt",
+      "install": ["git", "ripgrep", "ca-certificates", "curl", "jq", "python3"]
+    },
+    {
+      "name": "hax",
+      "type": "binary",
+      "description": "installed as hax: it spawns subagents by invoking that name",
+      "artifacts": {
+        "amd64": {
+          "url": "https://github.com/OleksandrChekhovskyi/hax/releases/download/v0.5.0/hax-0.5.0-linux-x86_64.tar.gz",
+          "sha256": "0b8480b7d7377ffeabbdc674499f4f2b9ac10f90b6ddac49bd622b04d044fc7e",
+          "member": "hax"
+        },
+        "arm64": {
+          "url": "https://github.com/OleksandrChekhovskyi/hax/releases/download/v0.5.0/hax-0.5.0-linux-aarch64.tar.gz",
+          "sha256": "ead513f65eaf4684ffcca6f0355ff0c3ad6dc214d387029dd07734e06d26c3b0",
+          "member": "hax"
+        }
+      }
+    }
+  ],
+  "entrypoint": ["hax"]
+}

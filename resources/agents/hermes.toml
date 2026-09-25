@@ -1,0 +1,29 @@
+# Nous Research's hermes-agent. It prints prose, not a JSON stream, and speaks OpenAI Chat
+# Completions. Nothing found redirects its chat calls at the relay: measured against 0.19.0 with a
+# stub upstream, --base_url, OPENROUTER_BASE_URL and config.yaml's model.base_url each left the call
+# going to openrouter.ai. So it runs in --mode open only, where the container holds the key.
+name = "hermes"
+description = "hermes-agent; OpenAI Chat Completions, --mode open only"
+recipe = "hermes"
+skills_dir = ".hermes/skills"
+protocols = ["openai-chat"]
+stream = "hermes"
+
+argv = [
+  "--base_url={base_url}",
+  "--model={model}",
+  "--query={task}",
+  { args = ["--max_turns={max_turns}"] },
+]
+
+[check]
+# hermes resolves a bare name against OpenRouter's catalogue; there is no default worth guessing.
+require = ["model"]
+relay = "hermes cannot be pointed at the relay: 0.19.0 ignores --base_url, OPENROUTER_BASE_URL and config.yaml's base_url alike. Use --mode open, where the container holds the key."
+
+[wire]
+# The environment, not the --api_key flag: an argv is visible to `inspect`.
+key_env = "OPENROUTER_API_KEY"
+# Named for --dry-run to print; hermes takes the endpoint on the command line.
+base_url_env = "HERMES_RELAY_BASE_URL"
+base_url = "{endpoint}{api_prefix}"

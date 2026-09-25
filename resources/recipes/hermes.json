@@ -1,0 +1,24 @@
+{
+  "name": "hermes",
+  "description": "hermes-agent on python:3.12-slim, which the project caps below 3.14",
+  "agent": "hermes",
+  "from": "docker.io/library/python:3.12-slim",
+  "user": "agent",
+  "home": "/home/agent",
+  "sections": [
+    {
+      "name": "base-tools",
+      "type": "apt",
+      "install": ["git", "ripgrep", "ca-certificates", "curl", "jq"]
+    },
+    {
+      "name": "agent",
+      "type": "pip",
+      "install": ["hermes-agent==0.19.0"]
+    }
+  ],
+  "env": {
+    "PYTHONUNBUFFERED": "1"
+  },
+  "entrypoint": ["python", "-m", "run_agent"]
+}

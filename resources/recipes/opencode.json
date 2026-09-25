@@ -1,0 +1,27 @@
+{
+  "name": "opencode",
+  "description": "opencode on node:22-slim, with both provider drivers installed at build",
+  "agent": "opencode",
+  "from": "docker.io/library/node:22-slim",
+  "user": "node",
+  "home": "/home/node",
+  "sections": [
+    {
+      "name": "base-tools",
+      "type": "apt",
+      "install": ["git", "ripgrep", "ca-certificates", "curl", "jq", "python3"]
+    },
+    {
+      "name": "agent",
+      "type": "npm",
+      "install": ["opencode-ai@1.18.29"]
+    },
+    {
+      "name": "drivers",
+      "type": "npm",
+      "description": "fetched at run time otherwise, which sealed has no route for",
+      "install": ["@ai-sdk/openai-compatible@3.0.48", "@ai-sdk/anthropic@4.0.53"]
+    }
+  ],
+  "entrypoint": ["opencode"]
+}

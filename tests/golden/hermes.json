@@ -1,0 +1,44 @@
+{
+  "files": {},
+  "tags": {
+    "none": "sanduk-hermes:39e309e16922",
+    "uid1001": "sanduk-hermes:2813a1e29664"
+  },
+  "resolved": {
+    "name": "hermes",
+    "agent": "hermes",
+    "from": "docker.io/library/python:3.12-slim",
+    "user": "agent",
+    "home": "/home/agent",
+    "sections": [
+      {
+        "name": "base-tools",
+        "type": "apt",
+        "install": [
+          "git",
+          "ripgrep",
+          "ca-certificates",
+          "curl",
+          "jq"
+        ]
+      },
+      {
+        "name": "agent",
+        "type": "pip",
+        "install": [
+          "hermes-agent==0.19.0"
+        ]
+      }
+    ],
+    "kits": [],
+    "env": {
+      "PYTHONUNBUFFERED": "1"
+    },
+    "entrypoint": [
+      "python",
+      "-m",
+      "run_agent"
+    ],
+    "instructions": []
+  }
+}

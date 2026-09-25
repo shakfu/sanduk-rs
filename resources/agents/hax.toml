@@ -1,0 +1,40 @@
+# `hax --json`: a static binary speaking Anthropic Messages and OpenAI Chat Completions. Both of
+# its first-party endpoints are pinned, so every run uses one of its `*-compatible` providers,
+# whose base URL and key come from the environment.
+name = "hax"
+description = "hax; speaks Anthropic Messages and OpenAI Chat Completions"
+recipe = "hax"
+skills_dir = ".agents/skills"
+# $XDG_CONFIG_HOME/hax/AGENTS.md. Skipped under --bare.
+instructions_file = ".config/hax/AGENTS.md"
+protocols = ["anthropic-messages", "openai-chat"]
+stream = "hax"
+
+argv = [
+  "--json",
+  "--provider={family}-compatible",
+  { args = ["--model={model}"] },
+  { args = ["--effort={effort}"] },
+  { when = "bare", args = ["--bare"] },
+  "{task}",
+]
+
+[check]
+# Claude Code's flags. hax has no approval gate at all: the container is the boundary.
+refuse = ["allowed_tools", "permission_mode"]
+
+[vars.family]
+from = "protocol"
+map = { "anthropic-messages" = "anthropic", "openai-chat" = "openai" }
+
+[wire]
+key_env = "HAX_{family|upper}_API_KEY"
+base_url_env = "HAX_{family|upper}_BASE_URL"
+# hax posts <base>/messages or <base>/chat/completions, so the base carries the provider's prefix.
+base_url = "{endpoint}{api_prefix}"
+
+[wire.env]
+# The relay's network has no route off the host, so the model metadata fetch can only time out.
+HAX_CATALOG_URL = ""
+HAX_NOTIFY = "off"
+HAX_MAX_TURNS = "{max_turns}"

@@ -1,0 +1,46 @@
+{
+  "files": {},
+  "tags": {
+    "none": "sanduk-claude:027b3203b2ac",
+    "uid1001": "sanduk-claude:03ae1ba3d18d"
+  },
+  "resolved": {
+    "name": "claude",
+    "agent": "claude",
+    "from": "docker.io/library/node:22-slim",
+    "user": "node",
+    "home": "/home/node",
+    "sections": [
+      {
+        "name": "base-tools",
+        "type": "apt",
+        "install": [
+          "git",
+          "ripgrep",
+          "ca-certificates",
+          "curl",
+          "jq",
+          "python3"
+        ]
+      },
+      {
+        "name": "agent",
+        "type": "npm",
+        "install": [
+          "@anthropic-ai/claude-code@2.1.272"
+        ]
+      }
+    ],
+    "kits": [],
+    "env": {
+      "DISABLE_AUTOUPDATER": "1",
+      "DISABLE_TELEMETRY": "1",
+      "DISABLE_ERROR_REPORTING": "1",
+      "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+    },
+    "entrypoint": [
+      "claude"
+    ],
+    "instructions": []
+  }
+}

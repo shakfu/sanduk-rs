@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# A stand-in docker CLI for the CLI tests. State lives under $FAKE_DOCKER_STATE; every call is
+# appended to $FAKE_DOCKER_STATE/log: arguments end in a unit separator, calls in a record separator,
+# since an argument (the task) can hold newlines.
+set -u
+state="${FAKE_DOCKER_STATE:?}"
+mkdir -p "$state/nets"
+touch "$state/containers" "$state/images"
+{ printf '%s\x1f' "$@"; printf '\x1e'; } >> "$state/log"
+
+containers="$state/containers"
+set_state() { # name image state
+  grep -v "^$1	" "$containers" > "$containers.tmp" || true
+  printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "$containers.tmp"
+  mv "$containers.tmp" "$containers"
+}
+
+case "$1" in
+  info)
+    case "$*" in
+      *ServerVersion*) [ -n "${FAKE_DOCKER_DOWN:-}" ] && { echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock." >&2; exit 1; }; echo 29.0.0 ;;
+      *OperatingSystem*) echo "${FAKE_DOCKER_OS:-Ubuntu 24.04.5 LTS}" ;;
+    esac ;;
+  image)
+    case "$2" in
+      inspect)
+        if [ "$3" = "--format" ]; then
+          # The label every shipped Containerfile sets, from the uid the image was built for.
+          if [ -n "${FAKE_DOCKER_LABELS:-}" ]; then echo "$FAKE_DOCKER_LABELS"
+          elif [ -f "$state/uid" ]; then printf '{"sanduk.agent-uid": "%s"}\n' "$(cat "$state/uid")"
+          else echo null; fi
+          exit 0
+        fi
+        grep -qx -- "$3" "$state/images" ;;
+      ls) cat "$state/tags" 2>/dev/null ;;
+      rm) grep -qx -- "$3" "$state/images" || exit 1
+          grep -vx -- "$3" "$state/images" > "$state/images.tmp"; mv "$state/images.tmp" "$state/images" ;;
+    esac ;;
+  build)
+    tag=""; prev=""
+    for a in "$@"; do
+      [ "$prev" = "-t" ] && tag="$a"
+      case "$prev=$a" in --build-arg=AGENT_UID=*) echo "${a#AGENT_UID=}" > "$state/uid" ;; esac
+      prev="$a"
+    done
+    [ "${FAKE_DOCKER_BUILD_EXIT:-0}" = 0 ] || exit "$FAKE_DOCKER_BUILD_EXIT"
+    echo "$tag" >> "$state/images" ;;
+  network)
+    case "$2" in
+      inspect)
+        [ -f "$state/nets/$3" ] || exit 1
+        internal=$(cat "$state/nets/$3")
+        printf '[{"Name": "%s", "Internal": %s, "IPAM": {"Config": [{"Subnet": "127.0.0.0/8", "Gateway": "127.0.0.1"}]}}]\n' "$3" "$internal" ;;
+      create)
+        if [ "$3" = "--internal" ]; then echo true > "$state/nets/$4"; else echo false > "$state/nets/$3"; fi ;;
+      rm) [ -f "$state/nets/$3" ] || exit 1; rm "$state/nets/$3" ;;
+    esac ;;
+  ps) cat "$containers" ;;
+  stop) line=$(grep "^$2	" "$containers") && set_state "$2" "$(echo "$line" | cut -f2)" exited ;;
+  rm)
+    [ "${FAKE_DOCKER_RM_EXIT:-0}" = 0 ] || { echo "cannot remove $2" >&2; exit "$FAKE_DOCKER_RM_EXIT"; }
+    grep -q "^$2	" "$containers" || { echo "No such container: $2" >&2; exit 1; }
+    grep -v "^$2	" "$containers" > "$containers.tmp"; mv "$containers.tmp" "$containers" ;;
+  run)
+    shift
+    name=""; image=""; detach=""; work=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --name|--cpus|--memory|--cap-drop|--security-opt|--pids-limit|--user|-w|-e|--network|--entrypoint|--runtime|--mount)
+          [ "$1" = --name ] && name="$2"; shift 2 ;;
+        -v) work="${2%%:*}"; shift 2 ;;
+        -d) detach=1; shift ;;
+        --init|-i|--rm|-it) shift ;;
+        *) image="$1"; shift; break ;;
+      esac
+    done
+    set_state "$name" "$image" running
+    [ -n "$detach" ] && exit 0
+    # The agent: $FAKE_AGENT, given the workdir and its own argv.
+    FAKE_WORK="$work" "${FAKE_AGENT:?}" "$@"
+    code=$?
+    set_state "$name" "$image" exited
+    exit $code ;;
+esac

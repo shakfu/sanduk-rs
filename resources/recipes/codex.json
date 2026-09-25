@@ -1,0 +1,24 @@
+{
+  "name": "codex",
+  "description": "OpenAI codex on node:22-slim",
+  "agent": "codex",
+  "from": "docker.io/library/node:22-slim",
+  "user": "node",
+  "home": "/home/node",
+  "sections": [
+    {
+      "name": "base-tools",
+      "type": "apt",
+      "install": ["git", "ripgrep", "ca-certificates", "curl", "jq", "python3"]
+    },
+    {
+      "name": "agent",
+      "type": "npm",
+      "install": ["@openai/codex@0.153.4"]
+    }
+  ],
+  "env": {
+    "CODEX_DISABLE_UPDATE_CHECK": "1"
+  },
+  "entrypoint": ["codex"]
+}

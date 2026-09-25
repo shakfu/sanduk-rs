@@ -1,0 +1,59 @@
+[workspace]
+resolver = "3"
+members = [".", "crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+authors = ["Shakeeb Alireza"]
+repository = "https://github.com/shakfu/sanduk-rs"
+homepage = "https://github.com/shakfu/sanduk-rs"
+
+[package]
+name = "sanduk"
+description = "Run a coding agent in a disposable container, with the API key held on the host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "sanduk"
+path = "src/main.rs"
+
+[dependencies]
+# The relay. hyper for both ends: one HTTP/1.1 connection per upstream call, as the Python relay
+# made, and a server whose response body is a channel the forwarding task fills.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "io-util"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+# ring rather than rustls's default aws-lc-rs, which needs cmake to build.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+rustls-native-certs = "0.8"
+# preserve_order: a body the policy rewrites keeps its key order.
+serde_json = { version = "1", features = ["preserve_order"] }
+# Upstream answers in gzip when offered it, and the usage block is inside.
+flate2 = "1"
+# Agent specs are TOML; recipes and kits stay JSON, which their pins hash byte for byte.
+serde = { version = "1", features = ["derive"] }
+toml = { version = "0.9", features = ["preserve_order"] }
+# Kit pins and image tags.
+sha2 = "0.10"
+clap = { version = "4", features = ["derive", "wrap_help"] }
+# Recipe validation: every value that reaches a shell is matched against a character set.
+regex = "1"
+sanduk-container = { path = "crates/sanduk-container" }
+# Assistant state. Bundled: the schema is Python sanduk's, and a system SQLite is not a given.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+[target.'cfg(unix)'.dependencies]
+# O_NOFOLLOW for request-body log files.
+libc = "0.2"

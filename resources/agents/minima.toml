@@ -1,0 +1,36 @@
+# `minima -p --json`. Its --provider fixes the wire format and MINIMA_BASE_URL moves the endpoint,
+# so the relay is reached by naming the minima provider that speaks the run's protocol.
+name = "minima"
+description = "minima; speaks all three protocols"
+recipe = "minima"
+# $XDG_CONFIG_HOME/minima, which is ~/.config/minima in the image. Both from 0.3.0.
+skills_dir = ".config/minima/skills"
+instructions_file = ".config/minima/AGENTS.md"
+protocols = ["anthropic-messages", "openai-chat", "openai-responses"]
+stream = "minima"
+
+argv = [
+  "--json",
+  "--provider={minima_provider}",
+  "--model={model}",
+  { args = ["--max-turns={max_turns}"] },
+  # `=` binds the task to the flag, whatever it starts with.
+  "--prompt={task}",
+]
+
+[check]
+# A fresh container has no remembered model.
+require = ["model"]
+refuse = ["allowed_tools", "permission_mode", "effort"]
+
+# The minima registry entry of the same wire format. llamacpp rather than ollama: both are Chat
+# Completions, and the base URL is overridden either way.
+[vars.minima_provider]
+from = "provider"
+map = { anthropic = "anthropic", openai = "openai", openrouter = "openrouter", "openai-compat" = "llamacpp" }
+
+[wire]
+key_env = "MINIMA_API_KEY"
+base_url_env = "MINIMA_BASE_URL"
+# minima posts <base>/messages, /chat/completions or /responses.
+base_url = "{endpoint}{api_prefix}"

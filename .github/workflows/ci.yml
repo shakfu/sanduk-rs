@@ -1,0 +1,37 @@
+# Both platforms, because each has its own sandbox backend, and clippy sees only the code compiled
+# for the host.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # The sandbox tests need Landlock ABI 3, so a runner image without it should fail loudly
+      # rather than skip.
+      - if: runner.os == 'Linux'
+        run: cat /sys/kernel/security/lsm
+      # The cache tests skip when the directory they aim at is missing.
+      - if: runner.os == 'macOS'
+        run: brew install go
+      - run: mkdir -p "$(go env GOPATH)/bin" "$(go env GOPATH)/pkg/mod"
+      - run: make check

@@ -1,0 +1,59 @@
+{
+  "files": {
+    "files/pi/entrypoint/sanduk-pi": "21e6703b0cb07c1b8461130f6260b9b605aedd5129fcb17ce1ab7a0f6771ec95"
+  },
+  "tags": {
+    "none": "sanduk-pi:b58515e29c9f",
+    "uid1001": "sanduk-pi:f507d3bb660f"
+  },
+  "resolved": {
+    "name": "pi",
+    "agent": "pi",
+    "from": "docker.io/library/node:22-slim",
+    "user": "node",
+    "home": "/home/node",
+    "sections": [
+      {
+        "name": "base-tools",
+        "type": "apt",
+        "install": [
+          "git",
+          "ripgrep",
+          "ca-certificates",
+          "curl",
+          "jq",
+          "python3"
+        ]
+      },
+      {
+        "name": "agent",
+        "type": "npm",
+        "description": "--ignore-scripts is what pi's own containerization doc installs with",
+        "flags": [
+          "--ignore-scripts"
+        ],
+        "install": [
+          "@earendil-works/pi-coding-agent@0.85.1"
+        ]
+      },
+      {
+        "name": "entrypoint",
+        "type": "copy",
+        "from": "files/sanduk-pi",
+        "to": "/usr/local/bin/sanduk-pi",
+        "mode": "0755"
+      }
+    ],
+    "kits": [],
+    "env": {
+      "PI_CODING_AGENT_DIR": "/home/node/.pi/agent",
+      "PI_OFFLINE": "1",
+      "PI_SKIP_VERSION_CHECK": "1",
+      "PI_TELEMETRY": "0"
+    },
+    "entrypoint": [
+      "sanduk-pi"
+    ],
+    "instructions": []
+  }
+}

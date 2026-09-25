@@ -1,0 +1,11 @@
+#!/bin/sh
+# pi reads its provider from models.json in its config directory, and sanduk
+# knows the relay's address only at run time. Written here from the
+# environment, so the config never touches the bind mount, where it would sit
+# in the user's repository and be editable by the agent reading it.
+set -e
+if [ -n "$SANDUK_MODELS_JSON" ]; then
+  mkdir -p "$PI_CODING_AGENT_DIR"
+  printf %s "$SANDUK_MODELS_JSON" > "$PI_CODING_AGENT_DIR/models.json"
+fi
+exec pi "$@"

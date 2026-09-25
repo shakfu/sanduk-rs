@@ -1,0 +1,39 @@
+# `opencode run --format json`. It takes its whole config from OPENCODE_CONFIG_CONTENT, so nothing
+# is written into the bind mount, where a config would sit in the user's repository.
+name = "opencode"
+description = "opencode; speaks Anthropic Messages and OpenAI Chat Completions"
+recipe = "opencode"
+skills_dir = ".agents/skills"
+# Global rules; shadows the ~/.claude/CLAUDE.md fallback opencode also reads.
+instructions_file = ".config/opencode/AGENTS.md"
+protocols = ["anthropic-messages", "openai-chat"]
+stream = "opencode"
+
+argv = [
+  "run", "--format", "json",
+  # Nothing is there to answer a prompt, and the container is the boundary.
+  "--auto",
+  "--model", "sanduk/{model}",
+  "{task}",
+]
+
+[check]
+# The config names one model and --model selects it.
+require = ["model"]
+
+# The npm driver for the run's protocol.
+[vars.driver]
+from = "protocol"
+map = { "anthropic-messages" = "@ai-sdk/anthropic", "openai-chat" = "@ai-sdk/openai-compatible" }
+
+[wire]
+key_env = "OPENCODE_RELAY_KEY"
+base_url_env = "OPENCODE_RELAY_BASE_URL"
+base_url = "{endpoint}{api_prefix}"
+
+[wire.env.OPENCODE_CONFIG_CONTENT.json.provider.sanduk]
+npm = "{driver}"
+name = "sanduk relay"
+# A reference, so the credential stays in its own variable rather than inside this blob.
+options = { baseURL = "{base_url}", apiKey = "{{env:{key_env}}}" }
+models = { "{model}" = { name = "{model}" } }

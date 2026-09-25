@@ -1,0 +1,8 @@
+{
+  "name": "claude-docs",
+  "description": "Claude Code with diagram and Office document tooling",
+  "inherits": "claude",
+  "kits": [
+    {"name": "docs", "sha256": "7ad96f7cbe10f0824cce2b84aeb820ffb7eb3f496873e2dc22969456eeb79d67"}
+  ]
+}

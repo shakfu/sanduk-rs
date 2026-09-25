@@ -1,0 +1,27 @@
+{
+  "name": "claude",
+  "description": "Claude Code on node:22-slim",
+  "agent": "claude",
+  "from": "docker.io/library/node:22-slim",
+  "user": "node",
+  "home": "/home/node",
+  "sections": [
+    {
+      "name": "base-tools",
+      "type": "apt",
+      "install": ["git", "ripgrep", "ca-certificates", "curl", "jq", "python3"]
+    },
+    {
+      "name": "agent",
+      "type": "npm",
+      "install": ["@anthropic-ai/claude-code@2.1.272"]
+    }
+  ],
+  "env": {
+    "DISABLE_AUTOUPDATER": "1",
+    "DISABLE_TELEMETRY": "1",
+    "DISABLE_ERROR_REPORTING": "1",
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"
+  },
+  "entrypoint": ["claude"]
+}

@@ -1,0 +1,54 @@
+{
+  "name": "prime",
+  "description": "prime-agent's standalone binary on debian:trixie-slim, with its Python kernel prepared at build time",
+  "agent": "prime",
+  "from": "docker.io/library/debian:trixie-slim",
+  "user": "agent",
+  "home": "/home/agent",
+  "sections": [
+    {
+      "name": "base-tools",
+      "type": "apt",
+      "description": "fd-find and ripgrep are the fd and rg prime-agent would otherwise download unpinned",
+      "install": ["git", "ripgrep", "fd-find", "ca-certificates", "curl", "jq", "python3"]
+    },
+    {
+      "name": "agent",
+      "type": "archive",
+      "description": "the archive stays whole: prime-agent finds its assets and Python runtime beside the executable. x64 is the baseline build, for CPUs without AVX2",
+      "artifacts": {
+        "amd64": {
+          "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.9.5/prime-agent-0.9.5-linux-x64-baseline.tar.gz",
+          "sha256": "7888fd9735b97a6c9865738467b00f67ecba72e9e597f1de2480fb584e74a2b0"
+        },
+        "arm64": {
+          "url": "https://github.com/PrimeIntellect-ai/prime-agent/releases/download/v0.9.5/prime-agent-0.9.5-linux-arm64.tar.gz",
+          "sha256": "81303f98f31aed99aa641a66ccb87629940de1e45dd86d56ede1d88fd521971c"
+        }
+      },
+      "dest": "/opt/prime-agent",
+      "links": {"/usr/local/bin/prime-agent": "prime-agent"}
+    },
+    {
+      "name": "entrypoint",
+      "type": "copy",
+      "from": "files/sanduk-prime",
+      "to": "/usr/local/bin/sanduk-prime",
+      "mode": "0755"
+    },
+    {
+      "name": "kernel",
+      "type": "run",
+      "user": "agent",
+      "description": "the archive has no virtual environment, and a sealed run cannot fetch one: uv and Python are installed here",
+      "lines": ["PRIME_AGENT_INSTALL_UV=1 prime-agent --prime-agent-bootstrap"]
+    }
+  ],
+  "env": {
+    "PATH": "/home/agent/.local/bin:$PATH",
+    "PRIME_AGENT_CODING_AGENT_DIR": "/home/agent/.prime/agent",
+    "PI_OFFLINE": "1",
+    "PI_SKIP_VERSION_CHECK": "1"
+  },
+  "entrypoint": ["sanduk-prime"]
+}

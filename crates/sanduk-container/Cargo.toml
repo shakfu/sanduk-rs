@@ -1,0 +1,21 @@
+[package]
+name = "sanduk-container"
+description = "Drive a container engine's CLI: Apple's container on macOS, Docker elsewhere"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["container", "docker", "sandbox"]
+categories = ["command-line-utilities", "os"]
+
+[dependencies]
+# `network inspect` and `image inspect` answer in JSON. Untyped `Value`: each engine nests the
+# gateway differently, and a missing key reads as an absent network.
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+# `getuid` and `getgid`, for the build args a native Docker daemon needs.
+libc = "0.2"

@@ -1,0 +1,19 @@
+[package]
+name = "sanduk-sandbox"
+description = "Confine a child process's writes to a directory: Landlock on Linux, Seatbelt on macOS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["sandbox", "landlock", "seatbelt", "security"]
+categories = ["os"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# `confstr` for the per-user cache directory.
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"

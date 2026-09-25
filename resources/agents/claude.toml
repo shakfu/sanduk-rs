@@ -1,0 +1,28 @@
+# Anthropic's `claude`, in `-p --output-format stream-json` mode.
+name = "claude"
+description = "Claude Code; speaks Anthropic Messages only"
+recipe = "claude"
+skills_dir = ".claude/skills"
+# Skipped under --bare, which sanduk refuses beside a recipe's instructions.
+instructions_file = ".claude/CLAUDE.md"
+protocols = ["anthropic-messages"]
+stream = "claude"
+
+argv = [
+  "-p", "{task}", "--output-format", "stream-json", "--verbose",
+  { when = "bare", args = ["--bare"] },
+  # Nobody is there to answer a prompt.
+  { args = ["--permission-mode", "{permission_mode}"], else = ["--dangerously-skip-permissions"] },
+  { args = ["--model", "{model}"] },
+  { args = ["--effort", "{effort}"] },
+  { args = ["--allowed-tools", "{allowed_tools}"] },
+  { args = ["--max-turns", "{max_turns}"] },
+]
+
+[wire]
+key_env = "{provider_key_env}"
+base_url_env = "{provider_base_url_env}"
+# Claude Code appends /v1/messages itself, so the base URL is the bare root. Unset without a relay
+# or --base-url: the built-in api.anthropic.com is correct, and setting the variable would only add
+# a way to get it wrong.
+base_url = "{root}"

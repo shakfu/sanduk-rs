@@ -1,0 +1,50 @@
+{
+  "files": {},
+  "tags": {
+    "none": "sanduk-minima:cdf1f04904aa",
+    "uid1001": "sanduk-minima:a949a4015d38"
+  },
+  "resolved": {
+    "name": "minima",
+    "agent": "minima",
+    "from": "docker.io/library/debian:trixie-slim",
+    "user": "agent",
+    "home": "/home/agent",
+    "sections": [
+      {
+        "name": "base-tools",
+        "type": "apt",
+        "install": [
+          "git",
+          "ripgrep",
+          "ca-certificates",
+          "curl",
+          "jq",
+          "python3"
+        ]
+      },
+      {
+        "name": "minima",
+        "type": "binary",
+        "artifacts": {
+          "amd64": {
+            "url": "https://github.com/shakfu/minima/releases/download/0.3.0/minima-0.3.0-linux-x86_64.tar.gz",
+            "sha256": "b1efe3d406b7482001339b90254fd9a0293fee77ee40fbe0171de694e5d8d37c",
+            "member": "minima"
+          },
+          "arm64": {
+            "url": "https://github.com/shakfu/minima/releases/download/0.3.0/minima-0.3.0-linux-aarch64.tar.gz",
+            "sha256": "a55b48969684b9dc308899aa60257dd6729fd60a0928a3adefd21f9876b30617",
+            "member": "minima"
+          }
+        }
+      }
+    ],
+    "kits": [],
+    "env": {},
+    "entrypoint": [
+      "minima"
+    ],
+    "instructions": []
+  }
+}
