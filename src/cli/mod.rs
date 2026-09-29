@@ -69,6 +69,9 @@ enum Command {
     System(SystemArgs),
     /// Show registered agents, providers, runtimes, recipes, kits
     List(ListArgs),
+    /// Delete a run's containers once it has ended; started by `run` itself
+    #[command(hide = true)]
+    Reap(ReapArgs),
 }
 
 /// Flags every command that talks to a container engine takes.
@@ -129,6 +132,12 @@ struct ShellArgs {
     engine: EngineArgs,
     #[command(flatten)]
     image: ImageArgs,
+}
+
+#[derive(Args)]
+struct ReapArgs {
+    /// The run's ownership record
+    record: PathBuf,
 }
 
 #[derive(Args)]
@@ -302,6 +311,12 @@ pub fn main(argv: Vec<OsString>) -> i32 {
         Command::Destroy(args) => destroy(args),
         Command::System(args) => system(args),
         Command::List(args) => list(args),
+        Command::Reap(args) => {
+            // End of file: the run dropped its end, or died holding it.
+            let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
+            crate::runs::reap(&args.record);
+            Ok(0)
+        }
     };
     match result {
         Ok(code) => code,

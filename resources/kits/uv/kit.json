@@ -1,0 +1,40 @@
+{
+  "name": "uv",
+  "description": "uv and uvx 0.12.20, for Python projects; uses the image's python3 unless a project asks for another",
+  "tools": [
+    {
+      "name": "uv",
+      "type": "binary",
+      "description": "uv 0.12.20, MIT/Apache-2.0",
+      "artifacts": {
+        "amd64": {
+          "url": "https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-unknown-linux-gnu.tar.gz",
+          "sha256": "6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f",
+          "member": "uv-x86_64-unknown-linux-gnu/uv"
+        },
+        "arm64": {
+          "url": "https://github.com/astral-sh/uv/releases/download/0.12.20/uv-aarch64-unknown-linux-gnu.tar.gz",
+          "sha256": "8a7aad7bc76a2fae5151566ff3e43eacce0b2a113d5e4de3e4afe3e58fa2441e",
+          "member": "uv-aarch64-unknown-linux-gnu/uv"
+        }
+      }
+    },
+    {
+      "name": "uvx",
+      "type": "binary",
+      "description": "uvx, from the same archive",
+      "artifacts": {
+        "amd64": {
+          "url": "https://github.com/astral-sh/uv/releases/download/0.12.20/uv-x86_64-unknown-linux-gnu.tar.gz",
+          "sha256": "6590717592ace991ff83a63fef799e3ad9d33ecc8f96c5d6bdd732496e79337f",
+          "member": "uv-x86_64-unknown-linux-gnu/uvx"
+        },
+        "arm64": {
+          "url": "https://github.com/astral-sh/uv/releases/download/0.12.20/uv-aarch64-unknown-linux-gnu.tar.gz",
+          "sha256": "8a7aad7bc76a2fae5151566ff3e43eacce0b2a113d5e4de3e4afe3e58fa2441e",
+          "member": "uv-aarch64-unknown-linux-gnu/uvx"
+        }
+      }
+    }
+  ]
+}

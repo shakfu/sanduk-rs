@@ -243,6 +243,54 @@ fn the_shipped_docs_kit_is_pinned_by_claude_docs() {
     );
 }
 
+/// Every shipped kit reads: its downloads are pinned and its tools are well formed.
+#[test]
+fn every_shipped_kit_loads() {
+    let names = catalog::names(catalog::Kind::Kits).unwrap();
+    for name in ["build", "rust", "go", "uv"] {
+        assert!(names.iter().any(|n| n == name), "{name} is not shipped");
+    }
+    for name in &names {
+        kits::load(name, None).unwrap_or_else(|e| panic!("{name}: {}", e.message));
+    }
+}
+
+/// The toolchain kits stack on one image. Each links its binaries into /usr/local/bin rather
+/// than setting PATH, which a second kit's PATH would replace.
+#[test]
+fn the_toolchain_kits_compose_on_one_image() {
+    let kits: Vec<String> = ["build", "rust", "go", "uv"].map(String::from).into();
+    let recipe = recipes::resolve("claude", &kits).unwrap();
+    let rendered = recipes::render_recipe(&recipe, None, None).unwrap();
+    let text = &rendered.containerfile;
+    for used in &recipe.kits {
+        assert!(
+            !used.kit.env.iter().any(|(k, _)| k == "PATH"),
+            "{} sets PATH",
+            used.kit.name
+        );
+    }
+    // A run section's lines are a script in the build context, not the Containerfile.
+    let (_, script) = rendered
+        .files
+        .iter()
+        .find(|(rel, _)| rel.ends_with("kit-rust-toolchain.sh"))
+        .expect("the rust toolchain script is in the context");
+    let script = String::from_utf8_lossy(script);
+    assert!(
+        script.contains("ln -s \"$bin\" /usr/local/bin/"),
+        "{script}"
+    );
+    assert!(
+        text.contains("ln -sf /usr/local/go/bin/go /usr/local/bin/go"),
+        "{text}"
+    );
+    assert!(text.contains("/usr/local/bin/uvx"), "{text}");
+    assert!(text.contains("build-essential"), "{text}");
+    assert!(text.contains("ENV HOME=\"/home/node\""), "{text}");
+    assert!(text.contains("CARGO_HOME=\"/usr/local/cargo\""), "{text}");
+}
+
 // --- inheritance -----------------------------------------------------------------------------------
 
 /// A child step may need the parent's packages, so parents lead.

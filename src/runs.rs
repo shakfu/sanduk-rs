@@ -1,8 +1,9 @@
 //! Ownership records for the containers a run holds.
 //!
 //! SIGKILL runs no teardown, so a killed run leaves its container alive with the run token still
-//! inside it. Each run writes a record naming the containers it owns and the pid that owns them,
-//! and every later run deletes the containers whose owner is gone.
+//! inside it. Each run writes a record naming the containers it owns and the pid that owns them.
+//! The run's [`Reaper`] deletes them as soon as the run is gone, and every later run deletes the
+//! containers whose owner is gone, for a reaper that was killed too.
 //!
 //! The record, not the container name, marks a container reapable. `--keep` releases it, so a
 //! container the caller asked to inspect is never swept by the next run.
@@ -13,6 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
 
 use serde_json::{Value, json};
 
@@ -167,27 +169,105 @@ pub fn sweep_with(engine: impl Fn(&str) -> Result<Engine>) -> Vec<String> {
         let Some((engine, listed)) = found else {
             continue;
         };
-        let mut kept = false;
-        for container in containers_of(&record) {
-            if !listed.contains(&container) {
-                continue;
-            }
-            note(&format!(
-                "reaping {container}: the run that started it was killed"
-            ));
-            match engine.destroy(&container) {
-                Ok(()) => reaped.push(container),
-                Err(e) => {
-                    note(&e.0);
-                    kept = true;
-                }
-            }
-        }
-        if !kept {
-            remove(&path);
-        }
+        delete(&path, &record, engine, listed, &mut reaped);
     }
     reaped
+}
+
+/// Deletes what the record at `path` still names, whether or not its owner is alive, and returns
+/// what it deleted. For a [`Reaper`], which knows its run is over: a killed owner can linger as a
+/// zombie that [`owner_alive`] still reports, and [`sweep`] would skip it.
+pub fn reap(path: &Path) -> Vec<String> {
+    reap_with(path, |name| Ok(Engine::get(Some(name))?))
+}
+
+/// [`reap`], with the engine for the record's runtime from `engine`.
+pub fn reap_with(path: &Path, engine: impl Fn(&str) -> Result<Engine>) -> Vec<String> {
+    let mut reaped = Vec::new();
+    let Some((path, record)) = records().into_iter().find(|(p, _)| p == path) else {
+        return reaped;
+    };
+    let runtime = record.get("runtime").and_then(Value::as_str).unwrap_or("");
+    let Ok(engine) = engine(runtime) else {
+        return reaped;
+    };
+    let Ok(listed) = engine.list_containers(CONTAINER_PREFIX) else {
+        return reaped;
+    };
+    let listed = listed.into_iter().map(|c| c.name).collect();
+    delete(&path, &record, &engine, &listed, &mut reaped);
+    reaped
+}
+
+/// Deletes the record's containers that `listed` still has, then the record, unless a delete
+/// failed: `inspect` on a container left behind shows its environment.
+fn delete(
+    path: &Path,
+    record: &Value,
+    engine: &Engine,
+    listed: &BTreeSet<String>,
+    reaped: &mut Vec<String>,
+) {
+    let mut kept = false;
+    for container in containers_of(record) {
+        if !listed.contains(&container) {
+            continue;
+        }
+        note(&format!(
+            "reaping {container}: the run that started it ended without deleting it"
+        ));
+        match engine.destroy(&container) {
+            Ok(()) => reaped.push(container),
+            Err(e) => {
+                note(&e.0);
+                kept = true;
+            }
+        }
+    }
+    if !kept {
+        remove(path);
+    }
+}
+
+/// A process that runs [`reap`] on one record when the run holding it ends, however it ends.
+///
+/// It reads a pipe this process holds the other end of. Dropping the reaper closes the pipe, and
+/// so does this process dying, SIGKILL included, which runs no teardown. It leads its own process
+/// group, so a caller that kills this one's group, as pma does at its deadline, does not reach it.
+/// A run that tore down cleanly released its record first, and the reaper finds nothing to do.
+///
+/// Tied to the run rather than the process: `serve` runs many in one process.
+pub struct Reaper {
+    child: Child,
+    pipe: Option<ChildStdin>,
+}
+
+impl Reaper {
+    /// Starts `sanduk reap <record>` from this executable. `None` when it cannot start; the next
+    /// run's sweep is still there.
+    pub fn start(record: &Path) -> Option<Reaper> {
+        use std::os::unix::process::CommandExt;
+
+        let exe = std::env::current_exe().ok()?;
+        let mut child = Command::new(exe)
+            .arg("reap")
+            .arg(record)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .map_err(|e| note(&format!("no reaper for this run: {e}")))
+            .ok()?;
+        let pipe = child.stdin.take();
+        Some(Reaper { child, pipe })
+    }
+}
+
+impl Drop for Reaper {
+    fn drop(&mut self) {
+        drop(self.pipe.take());
+        let _ = self.child.wait();
+    }
 }
 
 fn remove(path: &Path) {

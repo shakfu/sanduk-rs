@@ -56,7 +56,7 @@ Request bodies are read whole, up to 64 MiB (`max_body`), because the policy nee
 
 Every Python sanduk command, with the same flags and output: `run`, `build`, `shell`, `ps`, `stop`, `clean`, `destroy`, `system`, `list`, and the assistant commands `assistant`, `tell`, `tick`, `serve`, `outbox`, `approve`, `reject` and `runs`. `sanduk --help` lists them. Images and the assistants database are shared with Python sanduk: either binary uses what the other built or wrote.
 
-Agents are TOML files: see [docs/agents.md](docs/agents.md).
+Agents are TOML files: see [docs/agents.md](docs/agents.md). Kits add tools to an agent's image; `build`, `rust`, `go` and `uv` ship for `run --verify`, and stack: `--kit rust --kit uv`. `sanduk list kits` shows them.
 
 ## Development
 

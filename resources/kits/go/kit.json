@@ -1,0 +1,28 @@
+{
+  "name": "go",
+  "description": "Go 1.27.1 from go.dev",
+  "tools": [
+    {
+      "name": "go",
+      "type": "archive",
+      "description": "go1.27.1, BSD-3-Clause",
+      "artifacts": {
+        "amd64": {
+          "url": "https://go.dev/dl/go1.27.1.linux-amd64.tar.gz",
+          "sha256": "63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445",
+          "strip": 1
+        },
+        "arm64": {
+          "url": "https://go.dev/dl/go1.27.1.linux-arm64.tar.gz",
+          "sha256": "3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec",
+          "strip": 1
+        }
+      },
+      "dest": "/usr/local/go",
+      "links": {
+        "/usr/local/bin/go": "bin/go",
+        "/usr/local/bin/gofmt": "bin/gofmt"
+      }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "name": "build",
+  "description": "make, gcc, g++ and pkg-config, for a check that builds C or runs make",
+  "tools": [
+    {
+      "name": "toolchain",
+      "type": "apt",
+      "description": "Debian's build-essential and pkg-config",
+      "install": ["build-essential", "pkg-config"]
+    }
+  ]
+}

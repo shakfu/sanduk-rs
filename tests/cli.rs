@@ -287,6 +287,58 @@ fn a_terminated_run_deletes_its_container_first() {
     assert_eq!(w.records(), 0);
 }
 
+/// SIGKILL runs no teardown. The container is deleted anyway, before any later run's sweep: a
+/// caller that kills sanduk's process group, as pma does at its deadline, does not reach the reaper.
+#[test]
+fn a_killed_run_has_its_container_deleted_without_waiting_for_another_run() {
+    use std::os::unix::process::CommandExt;
+
+    let w = World::new("sigkill");
+    w.agent("echo started > \"$FAKE_WORK/started\"\nsleep 60");
+    let work = w.work();
+    let mut child = w
+        .command(&[
+            "run",
+            "task",
+            "-w",
+            &work,
+            "--agent",
+            "claude",
+            "--provider",
+            "anthropic",
+            "--runtime",
+            "docker",
+            "--skip-key-check",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let started = w.path("work/started");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !started.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the agent never started"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // SAFETY: signalling the group our own child leads.
+    unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
+    child.wait().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !(w.containers().is_empty() && w.records() == 0) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "left after the kill: {:?}, {} record(s)",
+            w.containers(),
+            w.records()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn stream_json_passes_every_line_through_verbatim_and_quietly() {
     let w = World::new("stream");
@@ -463,6 +515,201 @@ fn a_bad_mount_is_refused_before_anything_is_started() {
         "{:?}",
         w.calls()
     );
+}
+
+// --- --verify ---------------------------------------------------------------------------------------
+
+fn stats_of(path: &Path) -> Value {
+    serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+}
+
+/// The check sees the agent's edit, runs in a container of its own, and is never handed the key.
+#[test]
+fn verify_runs_after_the_agent_in_a_second_container_without_the_key() {
+    let w = World::new("verify");
+    w.agent(&format!(
+        "echo hi > \"$FAKE_WORK/hello.txt\"\n{}",
+        say(RESULT)
+    ));
+    let stats = w.path("out/stats.json");
+    let out = w.run(&[
+        "--verify",
+        "test -f hello.txt",
+        "--stats-file",
+        stats.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stats = stats_of(&stats);
+    assert_eq!(stats["ok"], true);
+    assert_eq!(stats["mode"], "open");
+    assert_eq!(stats["relay"], Value::Null);
+    assert_eq!(stats["verify"]["command"], "test -f hello.txt");
+    assert_eq!(stats["verify"]["exit"], 0);
+    assert_eq!(stats["verify"]["ok"], true);
+    let calls = w.calls();
+    let check = calls
+        .iter()
+        .find(|c| c[0] == "run" && c.iter().any(|a| a.ends_with("-verify")))
+        .expect("a second container ran the check");
+    assert!(
+        check.windows(2).any(|p| p == ["--entrypoint", "sh"]),
+        "{check:?}"
+    );
+    assert!(
+        !check.iter().any(|a| a.contains("ANTHROPIC_API_KEY")),
+        "the check was handed the key: {check:?}"
+    );
+    assert_eq!(w.containers(), "");
+    assert_eq!(w.records(), 0);
+}
+
+/// One combined status could not tell a failed edit from a failed test.
+#[test]
+fn a_failing_verify_is_recorded_and_leaves_the_exit_status_to_the_agent() {
+    let w = World::new("verifyfail");
+    w.agent(&say(RESULT));
+    let stats = w.path("out/stats.json");
+    let out = w.run(&[
+        "--verify",
+        "exit 3",
+        "--stats-file",
+        stats.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stderr(&out).contains("verify `exit 3`: failed (exit 3)"));
+    let stats = stats_of(&stats);
+    assert_eq!(stats["exit"], 0);
+    assert_eq!(stats["verify"]["exit"], 3);
+    assert_eq!(stats["verify"]["ok"], false);
+}
+
+#[test]
+fn verify_is_not_run_when_the_agent_did_not_finish() {
+    let w = World::new("verifyskip");
+    w.agent(&format!("{}\nexit 3", say(TOOL_USE)));
+    let stats = w.path("out/stats.json");
+    let out = w.run(&[
+        "--verify",
+        "touch ran",
+        "--stats-file",
+        stats.to_str().unwrap(),
+    ]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(!w.path("work/ran").exists());
+    let stats = stats_of(&stats);
+    assert_eq!(stats["verify"]["ok"], Value::Null);
+    assert!(
+        stats["verify"]["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("not run"),
+        "{stats}"
+    );
+}
+
+/// The check and the agent share --timeout; a check that outlives it is killed and deleted.
+#[test]
+fn a_verify_that_hangs_is_killed_at_the_run_s_deadline() {
+    let w = World::new("verifyhang");
+    w.agent(&say(RESULT));
+    let stats = w.path("out/stats.json");
+    let started = std::time::Instant::now();
+    let out = w.run(&[
+        "--verify",
+        "sleep 60",
+        "--timeout",
+        "3",
+        "--stats-file",
+        stats.to_str().unwrap(),
+    ]);
+    assert!(started.elapsed() < Duration::from_secs(20));
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stats = stats_of(&stats);
+    assert_eq!(stats["verify"]["timed_out"], true);
+    assert_eq!(stats["verify"]["exit"], Value::Null);
+    assert_eq!(w.containers(), "");
+    assert_eq!(w.records(), 0);
+}
+
+/// A base tree checked in the container a run with the same flags uses: no agent, no relay, no
+/// key needed. The exit status is the check's.
+#[test]
+fn verify_with_no_task_checks_the_tree_alone() {
+    let w = World::new("checkonly");
+    let work = w.work();
+    let stats = w.path("out/stats.json");
+    let check = |w: &World| {
+        w.command(&[
+            "run",
+            "-w",
+            &work,
+            "--agent",
+            "claude",
+            "--provider",
+            "anthropic",
+            "--runtime",
+            "docker",
+            "--mode",
+            "sealed",
+            "--verify",
+            "test -f marker",
+            "--stats-file",
+            stats.to_str().unwrap(),
+        ])
+        .env_remove("ANTHROPIC_API_KEY")
+        .output()
+        .unwrap()
+    };
+    let out = check(&w);
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(stats_of(&stats)["verify"]["ok"], false);
+    std::fs::write(w.path("work/marker"), "").unwrap();
+    let out = check(&w);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let s = stats_of(&stats);
+    assert_eq!(s["verify"]["ok"], true);
+    assert_eq!(s["mode"], "sealed");
+    let runs: Vec<_> = w.calls().into_iter().filter(|c| c[0] == "run").collect();
+    assert!(
+        runs.iter()
+            .all(|c| c.iter().any(|a| a.ends_with("-verify"))),
+        "only the check ran: {runs:?}"
+    );
+    assert!(
+        runs.iter()
+            .all(|c| c.windows(2).any(|p| p == ["--network", "sanduk-net"])),
+        "on the sealed network: {runs:?}"
+    );
+    assert_eq!(w.containers(), "");
+    assert_eq!(w.records(), 0);
+}
+
+/// Through the relay, the stats file counts its calls as numbers.
+#[test]
+fn a_relayed_run_s_stats_file_counts_the_relay_s_calls() {
+    let w = World::new("relaystats");
+    let (addr, _seen) = upstream();
+    w.agent(&format!(
+        "curl -s -o /dev/null -H \"x-api-key: $ANTHROPIC_API_KEY\" -H 'content-type: application/json' \
+         -d '{{\"model\":\"m\",\"max_tokens\":8,\"messages\":[]}}' \"$ANTHROPIC_BASE_URL/v1/messages\"\n{}",
+        say(RESULT)
+    ));
+    let stats = w.path("out/stats.json");
+    let upstream_url = format!("http://{addr}");
+    let out = w.run(&[
+        "--mode",
+        "sealed",
+        "--upstream",
+        &upstream_url,
+        "--stats-file",
+        stats.to_str().unwrap(),
+    ]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stats = stats_of(&stats);
+    assert_eq!(stats["mode"], "sealed");
+    assert_eq!(stats["relay"]["requests"], 1, "{stats}");
+    assert_eq!(stats["relay"]["rejected"], 0);
+    assert_eq!(stats["verify"], Value::Null);
 }
 
 // --- teardown ---------------------------------------------------------------------------------------

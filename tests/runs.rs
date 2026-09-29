@@ -3,7 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use sanduk::runs::{self, claim, owner_alive, runs_dir, sweep_with};
+use sanduk::runs::{self, claim, owner_alive, reap_with, runs_dir, sweep_with};
 use sanduk::{preflight, util};
 use sanduk_container::{Captured, Engine, Exec, Kind};
 use serde_json::Value;
@@ -194,6 +194,33 @@ fn an_unreadable_record_is_dropped() {
     std::fs::write(runs_dir().join("sanduk-abcd.json"), "{not json").unwrap();
     assert!(sweep_with(engine_of(&f)).is_empty());
     assert_eq!(records(), 0);
+}
+
+/// A reaper knows its run is over, so it does not ask the pid: a killed owner not yet waited for
+/// is a zombie, and a zombie answers as alive.
+#[test]
+fn a_reaper_deletes_its_record_s_containers_whoever_owns_them() {
+    let _s = State::new("reap");
+    let f = fake(&["sanduk-abcd", "sanduk-hold-ef", "sanduk-other"], true);
+    let mut run = claim("docker", "sanduk-abcd").unwrap();
+    run.add("sanduk-hold-ef").unwrap();
+    assert_eq!(
+        reap_with(&run.path, engine_of(&f)),
+        ["sanduk-abcd", "sanduk-hold-ef"]
+    );
+    assert_eq!(*f.containers.lock().unwrap(), ["sanduk-other"]);
+    assert_eq!(records(), 0);
+}
+
+/// A run that tore down released its record before the reaper woke.
+#[test]
+fn a_reaper_of_a_released_record_deletes_nothing() {
+    let _s = State::new("reapreleased");
+    let f = fake(&["sanduk-abcd"], true);
+    let run = claim("docker", "sanduk-abcd").unwrap();
+    run.release();
+    assert!(reap_with(&run.path, engine_of(&f)).is_empty());
+    assert!(f.deleted.lock().unwrap().is_empty());
 }
 
 #[test]

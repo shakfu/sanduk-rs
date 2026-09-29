@@ -16,15 +16,15 @@ use regex::Regex;
 use sanduk_container::{CONTAINER_PREFIX, ContainerSpec, Engine, Mount, Via, wait_for_gateway};
 
 use super::{EngineArgs, ImageArgs};
-use crate::agent::launch::{Signals, launch};
+use crate::agent::launch::{self, Signals, launch};
 use crate::agent::{self, Agent, DEFAULT_AGENT, Endpoint, Options, Outcome, REPORT_NAME, Wiring};
 use crate::catalog::Origin;
 use crate::error::{Error, Result};
 use crate::preflight::{firewall_warning, validate_key};
 use crate::providers::{DEFAULT_PROVIDER, Provider, Scheme, get_provider, parse_upstream};
 use crate::recipes::{self, Recipe, Rendered};
-use crate::relay::{Config, PING, Relay};
-use crate::runs::{self, Run, claim};
+use crate::relay::{Config, PING, Relay, Stats};
+use crate::runs::{self, Reaper, Run, claim};
 use crate::util::{copy_unfollowed, note, open_unfollowed, random_hex, seconds, shell_join, token};
 
 /// Where -w lands inside the container.
@@ -111,9 +111,14 @@ pub struct RunArgs {
     /// Another host directory in the container, e.g. ../repo:/repo:ro. Repeatable. Read-write unless :ro
     #[arg(long, value_name = "HOST:DEST[:ro]")]
     pub mount: Vec<String>,
-    /// Write the run's outcome here as JSON: exit, ok, stats, error, report
+    /// Write the run's outcome here as JSON: exit, ok, stats, error, report, mode, relay, verify
     #[arg(long)]
     pub stats_file: Option<PathBuf>,
+    /// After the agent finishes, run CMD with `sh -c` in a second container: same image, mounts and
+    /// network, no credential, within the same --timeout. Its result goes to --stats-file, not the
+    /// exit status. With no task, only CMD runs
+    #[arg(long, value_name = "CMD")]
+    pub verify: Option<String>,
 
     #[command(flatten)]
     pub engine: EngineArgs,
@@ -245,6 +250,7 @@ pub struct RunArgs {
 
 /// The mode, resolved into what the run path reads.
 struct Resolved {
+    name: String,
     relayed: bool,
     egress: bool,
     network: String,
@@ -296,6 +302,7 @@ fn resolve_mode(args: &RunArgs) -> Result<Resolved> {
         }
     };
     Ok(Resolved {
+        name,
         relayed: mode.relayed,
         egress: mode.egress,
         network,
@@ -928,9 +935,19 @@ struct Held {
     relay: Option<Relay>,
     holder: Option<String>,
     record: Option<Run>,
+    /// Last, so it is dropped after the record is released or kept.
+    reaper: Option<Reaper>,
 }
 
 impl Held {
+    /// Claims `name` and starts the reaper that deletes it if this process dies holding it.
+    fn claim(&mut self, runtime: &str, name: &str) -> Result<()> {
+        let record = claim(runtime, name)?;
+        self.reaper = Reaper::start(&record.path);
+        self.record = Some(record);
+        Ok(())
+    }
+
     fn give_back(&mut self, engine: &Engine) {
         if let Some(relay) = self.relay.take() {
             relay.shutdown();
@@ -943,6 +960,7 @@ impl Held {
         if let Some(record) = self.record.take() {
             record.release();
         }
+        drop(self.reaper.take());
     }
 }
 
@@ -963,6 +981,12 @@ pub fn run(args: RunArgs) -> Result<i32> {
         ));
     }
     let sel = select(&args, &mode, &engine)?;
+    if args.task.is_none()
+        && args.task_file.is_none()
+        && let Some(command) = &args.verify
+    {
+        return check_only(&args, &mode, &engine, &sel, command);
+    }
     let provider = sel.provider;
     let api_url = format!("{}://{}", sel.scheme.as_str(), sel.host);
     let task = read_task(&args)?;
@@ -1023,7 +1047,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
             run_token = token(24)?;
             if !args.dry_run {
                 ensure_image(&engine, &args, &sel, &workdir, socket.as_ref())?;
-                held.record = Some(claim(engine.kind().name(), &name)?);
+                held.claim(engine.kind().name(), &name)?;
                 // Outlive the run: the holder going first takes the bridge, and the relay's
                 // address, with it.
                 held.holder = engine.hold_network_up(
@@ -1091,6 +1115,20 @@ pub fn run(args: RunArgs) -> Result<i32> {
 
         if args.dry_run {
             println!("{}", shell_join(&cmd));
+            if let Some(command) = &args.verify {
+                let spec = verify_spec(
+                    &args,
+                    &sel,
+                    &format!("{name}-verify"),
+                    &workdir,
+                    &dest,
+                    network.clone(),
+                    &mounts,
+                    user.clone(),
+                    command,
+                );
+                println!("# verify: {}", shell_join(&engine.run_argv(&spec)));
+            }
             if mode.relayed {
                 println!("# proxy: {gateway} -> {api_url} ({})", provider.name);
             }
@@ -1116,7 +1154,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
         }
         runs::sweep();
         if held.record.is_none() {
-            held.record = Some(claim(engine.kind().name(), &name)?);
+            held.claim(engine.kind().name(), &name)?;
         }
         if let Some(signum) = Signals::caught() {
             return Err(Error::with_code("interrupted", 128 + signum));
@@ -1179,8 +1217,10 @@ pub fn run(args: RunArgs) -> Result<i32> {
     };
     let mut relay_prices = false;
     let mut spent = 0.0;
+    let mut relay_stats = None;
     if let Some(relay) = held.relay.take() {
         let stats = relay.stats();
+        relay_stats = Some(stats);
         relay_prices = provider.cost_field.is_some();
         spent = stats.spent;
         let spent_note = if relay_prices {
@@ -1194,6 +1234,29 @@ pub fn run(args: RunArgs) -> Result<i32> {
             stats.requests, stats.rejected
         ));
     }
+    // After the relay is gone: the check calls no provider, and holds no token for one.
+    let mut verify_gone = true;
+    let verified = args.verify.as_deref().map(|command| {
+        let agent_ok = matches!(&launched, Ok(r) if r.outcome.as_ref().is_some_and(|o| o.ok));
+        if !agent_ok || Signals::caught().is_some() {
+            return Verified::not_run(command, "the agent did not finish");
+        }
+        let spec = verify_spec(
+            &args,
+            &sel,
+            &format!("{name}-verify"),
+            &workdir,
+            &dest,
+            network.clone(),
+            &mounts,
+            user.clone(),
+            command,
+        );
+        let left = Duration::from_secs(mode.timeout).saturating_sub(started.elapsed());
+        let (verified, gone) = verify(&engine, held.record.as_mut(), &spec, command, left);
+        verify_gone = gone;
+        verified
+    });
     let mut holder_gone = true;
     if let Some(holder) = held.holder.take()
         && let Err(e) = engine.destroy(&holder)
@@ -1205,9 +1268,12 @@ pub fn run(args: RunArgs) -> Result<i32> {
     if let Some(record) = held.record.take()
         && gone
         && holder_gone
+        && verify_gone
     {
         record.release();
     }
+    drop(held.reaper.take());
+    let caught = Signals::caught();
     drop(signals);
 
     let (outcome, rc, failure) = match launched {
@@ -1215,6 +1281,10 @@ pub fn run(args: RunArgs) -> Result<i32> {
         Err(e) if e.message == "interrupted" => return Err(e),
         Err(e) => (None, e.code, e.message),
     };
+    // A signal during --verify, after the agent had finished.
+    if let Some(signum) = caught {
+        return Err(Error::with_code("interrupted", 128 + signum));
+    }
     note(&format!("{:.1}s wall", started.elapsed().as_secs_f64()));
     let outcome = outcome.map(|o| Outcome {
         stats: agent_stats(&o.stats, relay_prices, spent),
@@ -1223,7 +1293,214 @@ pub fn run(args: RunArgs) -> Result<i32> {
     if let Some(o) = &outcome {
         note(&o.stats);
     }
-    collect_report(&args, &workdir, outcome.as_ref(), rc, &failure)
+    let extra = extra(&mode, relay_stats, verified.as_ref());
+    collect_report(&args, &workdir, outcome.as_ref(), rc, &failure, extra)
+}
+
+/// `--verify` with no task: the check alone, in the container a run with the same flags would use,
+/// with no agent, no relay and no key. A base tree checked this way and a head checked after a run
+/// are compared in one environment.
+fn check_only(
+    args: &RunArgs,
+    mode: &Resolved,
+    engine: &Engine,
+    sel: &Selection,
+    command: &str,
+) -> Result<i32> {
+    let workdir = resolve_path(&args.workdir)?;
+    let dest = work_dest(args, &workdir);
+    let mounts = parse_mounts(&args.mount, &dest)?;
+    let user = container_user(args, engine)?;
+    let network = if mode.relayed {
+        Some(mode.network.clone())
+    } else {
+        args.network.clone()
+    };
+    let name = format!("{CONTAINER_PREFIX}{}-verify", random_hex(8)?);
+    let spec = verify_spec(
+        args, sel, &name, &workdir, &dest, network, &mounts, user, command,
+    );
+    if args.dry_run {
+        println!("{}", shell_join(&engine.run_argv(&spec)));
+        return Ok(0);
+    }
+    engine.require_run()?;
+    if mode.relayed {
+        engine.ensure_network(&mode.network, !mode.egress)?;
+    }
+    ensure_image(engine, args, sel, &workdir, None)?;
+    runs::sweep();
+    let signals = Signals::catch();
+    let mut held = Held::default();
+    held.claim(engine.kind().name(), &name)?;
+    let timeout = Duration::from_secs(mode.timeout);
+    let (verified, gone) = verify(engine, None, &spec, command, timeout);
+    if let Some(record) = held.record.take()
+        && gone
+    {
+        record.release();
+    }
+    drop(held.reaper.take());
+    let caught = Signals::caught();
+    drop(signals);
+    if let Some(signum) = caught {
+        return Err(Error::with_code("interrupted", 128 + signum));
+    }
+    let code = verified.code();
+    if let Some(stats_file) = &args.stats_file {
+        let mut record = serde_json::json!({
+            "exit": code,
+            "ok": code == 0,
+            "stats": "",
+            "error": verified.error,
+            "report": null,
+        });
+        merge(&mut record, extra(mode, None, Some(&verified)));
+        std::fs::write(stats_file, record.to_string())?;
+    }
+    Ok(code)
+}
+
+/// The check's container: the agent's image, mounts, network and user, running `sh -c CMD` in
+/// place of the agent. No key, token or agent wiring: the check calls no provider.
+#[allow(clippy::too_many_arguments)]
+fn verify_spec(
+    args: &RunArgs,
+    sel: &Selection,
+    name: &str,
+    workdir: &Path,
+    dest: &str,
+    network: Option<String>,
+    mounts: &[Mount],
+    user: Option<String>,
+    command: &str,
+) -> ContainerSpec {
+    ContainerSpec {
+        command: vec!["-c".into(), command.into()],
+        entrypoint: Some("sh".into()),
+        cpus: args.cpus,
+        memory: args.memory.clone(),
+        mount: Some((workdir.to_path_buf(), dest.into())),
+        mounts: mounts.to_vec(),
+        env: args.env.clone(),
+        network,
+        oci_runtime: args.oci_runtime.clone(),
+        user,
+        ..ContainerSpec::new(name, sel.image.tag.clone())
+    }
+}
+
+/// What `--verify` found. `exit` is `None` when the check did not end on its own.
+struct Verified {
+    command: String,
+    exit: Option<i32>,
+    seconds: f64,
+    timed_out: bool,
+    error: String,
+}
+
+impl Verified {
+    fn not_run(command: &str, why: &str) -> Self {
+        Verified {
+            command: command.into(),
+            exit: None,
+            seconds: 0.0,
+            timed_out: false,
+            error: format!("not run: {why}"),
+        }
+    }
+
+    /// The exit status `--verify` alone ends with: the check's, 124 at the deadline, else 1.
+    fn code(&self) -> i32 {
+        self.exit.unwrap_or(if self.timed_out { 124 } else { 1 })
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "command": self.command,
+            "exit": self.exit,
+            "ok": self.exit.map(|c| c == 0),
+            "seconds": (self.seconds * 10.0).round() / 10.0,
+            "timed_out": self.timed_out,
+            "error": self.error,
+        })
+    }
+}
+
+/// Runs the check's container and deletes it, which no `--rm` does. Claimed in `record` first, so
+/// a kill mid-check leaves it reapable. Returns the result, and whether the container is gone.
+fn verify(
+    engine: &Engine,
+    record: Option<&mut Run>,
+    spec: &ContainerSpec,
+    command: &str,
+    left: Duration,
+) -> (Verified, bool) {
+    if left.is_zero() {
+        return (Verified::not_run(command, "--timeout was spent"), true);
+    }
+    if let Some(record) = record
+        && let Err(e) = record.add(&spec.name)
+    {
+        return (Verified::not_run(command, &e.message), true);
+    }
+    let started = Instant::now();
+    let checked = launch::check(&engine.run_argv(spec), left);
+    let seconds = started.elapsed().as_secs_f64();
+    let gone = match engine.destroy(&spec.name) {
+        Ok(()) => true,
+        Err(e) => {
+            note(&e.0);
+            false
+        }
+    };
+    let verified = match checked {
+        Ok(c) => Verified {
+            command: command.into(),
+            exit: c.code,
+            seconds,
+            timed_out: c.timed_out,
+            error: if c.timed_out {
+                format!("exceeded --timeout after {seconds:.1}s")
+            } else {
+                String::new()
+            },
+        },
+        Err(e) => Verified {
+            error: e.message,
+            ..Verified::not_run(command, "")
+        },
+    };
+    note(&format!(
+        "verify `{command}`: {} in {seconds:.1}s",
+        match (verified.exit, verified.timed_out) {
+            (Some(0), _) => "passed".to_string(),
+            (Some(c), _) => format!("failed (exit {c})"),
+            (None, true) => "timed out".into(),
+            (None, false) => format!("did not finish: {}", verified.error),
+        }
+    ));
+    (verified, gone)
+}
+
+/// The stats file's fields beyond the agent's own.
+fn extra(mode: &Resolved, relay: Option<Stats>, verified: Option<&Verified>) -> serde_json::Value {
+    serde_json::json!({
+        "mode": mode.name,
+        "relay": relay.map(|s| serde_json::json!({
+            "requests": s.requests,
+            "rejected": s.rejected,
+            "spent": s.spent,
+            "unpriced": s.unpriced,
+        })),
+        "verify": verified.map(Verified::json),
+    })
+}
+
+fn merge(record: &mut serde_json::Value, extra: serde_json::Value) {
+    if let (Some(record), serde_json::Value::Object(extra)) = (record.as_object_mut(), extra) {
+        record.extend(extra);
+    }
 }
 
 /// How long the probe waits for the relay. A reachable relay answers in milliseconds.
@@ -1319,6 +1596,7 @@ fn collect_report(
     outcome: Option<&Outcome>,
     rc: i32,
     failure: &str,
+    extra: serde_json::Value,
 ) -> Result<i32> {
     let (error, code) = match outcome {
         // No terminal record: the agent never finished, whatever its status says.
@@ -1348,13 +1626,14 @@ fn collect_report(
                 .display()
                 .to_string()
         });
-        let record = serde_json::json!({
+        let mut record = serde_json::json!({
             "exit": code,
             "ok": outcome.is_some_and(|o| o.ok),
             "stats": outcome.map_or("", |o| o.stats.as_str()),
             "error": error,
             "report": named,
         });
+        merge(&mut record, extra);
         std::fs::write(stats_file, record.to_string())?;
     }
     match (&file, &args.report) {
