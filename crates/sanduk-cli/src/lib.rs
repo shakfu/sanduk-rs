@@ -9,7 +9,8 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-use sanduk_container::{CONTAINER_PREFIX, Container, Engine, Kind, default_kind};
+use sanduk::CONTAINER_PREFIX;
+use sanduk_container::{Container, Engine, Kind, default_kind};
 
 use sanduk::agent;
 use sanduk::catalog;
@@ -98,7 +99,7 @@ impl ImageArgs {
 
 impl EngineArgs {
     pub fn engine(&self) -> Result<Engine> {
-        Ok(Engine::get(self.runtime.as_deref())?)
+        Ok(Engine::get(self.runtime.as_deref(), sanduk::prefix())?)
     }
 }
 

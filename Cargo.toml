@@ -3,7 +3,7 @@ resolver = "3"
 members = [".", "crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -48,7 +48,7 @@ toml = "0.9"
 sha2 = "0.10"
 # Recipe validation: every value that reaches a shell is matched against a character set.
 regex = "1"
-sanduk-container = { path = "crates/sanduk-container", version = "0.1.0" }
+sanduk-container = { path = "crates/sanduk-container", version = "0.2.0" }
 
 [dev-dependencies]
 sanduk-container = { path = "crates/sanduk-container", features = ["test-util"] }

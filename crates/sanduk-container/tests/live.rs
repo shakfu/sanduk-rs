@@ -10,10 +10,17 @@
 
 use std::time::Duration;
 
-use sanduk_container::{CONTAINER_PREFIX, ContainerSpec, Engine, Kind, wait_for_gateway};
+use sanduk_container::runs::{self, Reaper};
+use sanduk_container::{ContainerSpec, Engine, Kind, Prefix, wait_for_gateway};
+
+const PREFIX: &str = "sanduk-";
 
 fn engine() -> Engine {
-    let engine = Engine::get(std::env::var("SANDUK_RUNTIME").ok().as_deref()).unwrap();
+    let engine = Engine::get(
+        std::env::var("SANDUK_RUNTIME").ok().as_deref(),
+        Prefix::new(PREFIX).unwrap(),
+    )
+    .unwrap();
     engine.require_run().unwrap();
     engine
 }
@@ -23,7 +30,7 @@ fn image() -> String {
 }
 
 fn unique(what: &str) -> String {
-    format!("{CONTAINER_PREFIX}test-{what}-{}", std::process::id())
+    format!("{PREFIX}test-{what}-{}", std::process::id())
 }
 
 /// Runs `spec` to completion, output captured.
@@ -82,11 +89,11 @@ fn a_network_comes_up_is_listed_and_goes_away() {
 
     let holder = engine.hold_network_up(&name, &image(), 120).unwrap();
     let bindable = wait_for_gateway(&network.gateway, Duration::from_secs(30));
-    let listed = engine.list_containers(CONTAINER_PREFIX).unwrap();
+    let listed = engine.list_containers(PREFIX).unwrap();
     if let Some(holder) = &holder {
         engine.destroy(holder).unwrap();
     }
-    let after = engine.list_containers(CONTAINER_PREFIX).unwrap();
+    let after = engine.list_containers(PREFIX).unwrap();
     let deleted = engine.delete_network(&name);
 
     assert_eq!(holder.is_some(), engine.kind().needs_network_holder());
@@ -222,6 +229,43 @@ fn a_sealed_container_reaches_no_address_off_the_host() {
             "the gap closed: update docs/dev/tsk-tsk.md"
         );
     }
+}
+
+/// The reaper is `sh` and the engine's real CLI: when its run ends without a teardown, the
+/// running container goes, and so does the record. `runs.rs` tests the script on a stub CLI.
+#[test]
+#[ignore]
+fn a_reaper_deletes_a_running_container_when_its_run_ends() {
+    let engine = engine();
+    let spec = ContainerSpec {
+        entrypoint: Some("sleep".into()),
+        command: vec!["300".into()],
+        detach: true,
+        ..ContainerSpec::new(unique("reap"), image())
+    };
+    let out = run(&engine, &spec);
+    assert!(out.status.success(), "{out:?}");
+    let dir = std::env::temp_dir().join(unique("runs"));
+    let record = runs::claim(&dir, engine.kind().name(), &spec.name).unwrap();
+    let reaper = Reaper::start(&record, &engine, &|m| panic!("{m}")).unwrap();
+    let listed = |name: &str| {
+        engine
+            .list_containers(PREFIX)
+            .unwrap()
+            .iter()
+            .any(|c| c.name == name)
+    };
+    let before = listed(&spec.name);
+    drop(reaper);
+    let after = listed(&spec.name);
+    if after {
+        let _ = engine.destroy(&spec.name);
+    }
+    let left = std::fs::read_dir(&dir).map_or(0, |d| d.count());
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(before, "the reaper acted before its run ended");
+    assert!(!after, "the container outlived its reaper");
+    assert_eq!(left, 0, "the record outlived its containers");
 }
 
 #[test]

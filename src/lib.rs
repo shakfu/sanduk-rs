@@ -38,6 +38,14 @@ pub mod run;
 pub mod sections;
 pub mod util;
 
+/// Every container, holder and image repository sanduk names starts with this.
+pub const CONTAINER_PREFIX: &str = "sanduk-";
+
+/// [`CONTAINER_PREFIX`], as an engine takes it.
+pub fn prefix() -> sanduk_container::Prefix {
+    sanduk_container::Prefix::new(CONTAINER_PREFIX).expect("CONTAINER_PREFIX is a valid prefix")
+}
+
 /// Runs agents with one set of directories and one observer. Holds no process-wide state: two in
 /// one process may differ in both.
 #[derive(Clone)]

@@ -87,7 +87,7 @@ impl World {
             cache: Dirs::default().cache,
             ..Dirs::under(&self.root)
         })
-        .engine(self.fake.engine())
+        .engine(self.fake.engine(sanduk::prefix()))
         .observer(self.notes.clone())
     }
 
@@ -371,6 +371,13 @@ fn the_check_runs_only_after_an_agent_that_finished() {
     assert_eq!(verified.exit, None);
     assert!(verified.error.starts_with("not run"), "{verified:?}");
     assert!(w.notes.output().is_empty());
+}
+
+/// The fake's reaper never calls the host's `docker`, which may have a daemon behind it.
+#[test]
+fn the_fakes_reaper_reaches_no_engine_on_the_host() {
+    let w = World::new("reapercli");
+    assert_eq!(w.fake.engine(sanduk::prefix()).reaper_cli(), "false");
 }
 
 /// An image built for another uid is refused with its facts, so a caller can offer its own fix.

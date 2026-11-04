@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-use sanduk_container::{AGENT_UID_LABEL, CONTAINER_PREFIX, Engine};
+use sanduk_container::{AGENT_UID_LABEL, Engine};
+
+use crate::CONTAINER_PREFIX;
 
 use crate::catalog::{self, Kind, NAME_RE, SHA256_RE};
 use crate::error::{Error, Result};

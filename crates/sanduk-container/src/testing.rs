@@ -7,8 +7,8 @@
 //! `sh -c` runs as itself. The agent's container runs what [`Fake::on_agent`] returns. A build
 //! records its tag and prints one line.
 //!
-//! The run record's reaper still calls `docker` on `PATH`. A run that finishes has released its
-//! record by then, so the reaper does nothing.
+//! The run record's reaper calls `false` in place of `docker`, so it never reaches a daemon on
+//! the host. To the reaper, every container is then already gone.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -17,7 +17,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use crate::{Captured, Engine, Exec, Kind};
+use crate::{AGENT_UID_LABEL, Captured, Engine, Exec, Kind, Prefix};
 
 type Agent = Box<dyn Fn(&Path, &[String]) -> Command + Send + Sync>;
 
@@ -133,8 +133,8 @@ impl Fake {
     }
 
     /// A Docker engine whose every command this fake answers.
-    pub fn engine(self: &Arc<Self>) -> Engine {
-        Engine::with_exec(Kind::Docker, self.clone()).poll_interval(Duration::ZERO)
+    pub fn engine(self: &Arc<Self>, prefix: Prefix) -> Engine {
+        Engine::with_exec(Kind::Docker, self.clone(), prefix).poll_interval(Duration::ZERO)
     }
 
     /// What the agent's container runs: given the host directory mounted as its workdir and the
@@ -184,7 +184,13 @@ impl Fake {
         let mut st = self.state();
         match argv {
             ["inspect", "--format", _, tag] => match st.images.get(*tag) {
-                Some(Some(uid)) => answer(0, format!("{{\"sanduk.agent-uid\": \"{uid}\"}}\n")),
+                Some(Some(uid)) => answer(
+                    0,
+                    format!(
+                        "{}\n",
+                        serde_json::json!({ AGENT_UID_LABEL: uid.to_string() })
+                    ),
+                ),
                 Some(None) => answer(0, "null\n"),
                 None => refuse(format!("No such image: {tag}")),
             },
@@ -314,6 +320,10 @@ impl Exec for Fake {
 
     fn which(&self, _program: &str) -> bool {
         true
+    }
+
+    fn reaper_cli(&self) -> Option<&str> {
+        Some("false")
     }
 
     /// `docker run` as a host process: the entrypoint in the mounted directory, or the agent.

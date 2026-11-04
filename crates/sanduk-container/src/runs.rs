@@ -18,7 +18,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 
 use serde_json::{Value, json};
 
-use crate::{CONTAINER_PREFIX, Engine, Kind, Result};
+use crate::{Engine, Prefix, Result};
 
 /// Whether the process that claimed a record is still there. A pid owned by another user answers
 /// EPERM, which is still a live process and still not ours to reap.
@@ -140,8 +140,8 @@ pub fn live_containers(dir: &Path) -> BTreeSet<String> {
 }
 
 /// Deletes the containers of every run in `dir` whose owner is gone, and returns them.
-pub fn sweep(dir: &Path, note: &dyn Fn(&str)) -> Vec<String> {
-    sweep_with(dir, |name| Engine::get(Some(name)), note)
+pub fn sweep(dir: &Path, prefix: &Prefix, note: &dyn Fn(&str)) -> Vec<String> {
+    sweep_with(dir, |name| Engine::get(Some(name), prefix.clone()), note)
 }
 
 /// [`sweep`], with the engine for a record's runtime from `engine`.
@@ -167,7 +167,7 @@ pub fn sweep_with(
             .to_string();
         let found = engines.entry(runtime.clone()).or_insert_with(|| {
             let engine = engine(&runtime).ok()?;
-            let listed = engine.list_containers(CONTAINER_PREFIX).ok()?;
+            let listed = engine.list_containers(engine.prefix()).ok()?;
             Some((engine, listed.into_iter().map(|c| c.name).collect()))
         });
         let Some((engine, listed)) = found else {
@@ -190,6 +190,11 @@ fn delete(
 ) {
     let mut kept = false;
     for container in containers_of(record) {
+        // Another prefix's container is not in `listed`, which would read as already gone.
+        if !container.starts_with(engine.prefix()) {
+            kept = true;
+            continue;
+        }
         if !listed.contains(&container) {
             continue;
         }
@@ -240,29 +245,16 @@ pub struct Reaper {
 }
 
 impl Reaper {
-    /// Starts the reaper for `run`, with its runtime's CLI. `None` when it cannot start; the next
-    /// run's sweep is still there.
-    pub fn start(run: &Run, note: &dyn Fn(&str)) -> Option<Reaper> {
-        let kind = Kind::from_name(&run.runtime)
-            .map_err(|e| note(&format!("no reaper for this run: {e}")))
-            .ok()?;
-        Self::start_as(run, kind.cli(), kind.delete_verb(), note)
-    }
-
-    /// [`start`](Self::start), with `cli` standing in for the engine's CLI.
-    pub fn start_as(
-        run: &Run,
-        cli: &str,
-        delete_verb: &str,
-        note: &dyn Fn(&str),
-    ) -> Option<Reaper> {
+    /// Starts the reaper for `run`, with the CLI `engine` names for its reaper. `None` when it
+    /// cannot start; the next run's sweep is still there.
+    pub fn start(run: &Run, engine: &Engine, note: &dyn Fn(&str)) -> Option<Reaper> {
         use std::os::unix::process::CommandExt;
 
         let mut child = Command::new("sh")
-            .args(["-c", REAP, "sanduk-reap"])
+            .args(["-c", REAP, &format!("{}reap", engine.prefix())])
             .arg(&run.path)
             .arg(run.names_path())
-            .args([cli, delete_verb])
+            .args([engine.reaper_cli(), engine.kind().delete_verb()])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

@@ -20,7 +20,9 @@ use std::time::{Duration, Instant};
 
 use regex::Regex;
 
-use sanduk_container::{CONTAINER_PREFIX, ContainerSpec, Engine, Mount, Via, wait_for_gateway};
+use sanduk_container::{ContainerSpec, Engine, Mount, Via, wait_for_gateway};
+
+use crate::{CONTAINER_PREFIX, prefix};
 
 use crate::agent::{self, Agent, DEFAULT_AGENT, Endpoint, Options as AgentOptions, REPORT_NAME};
 use crate::catalog::Origin;
@@ -873,7 +875,7 @@ impl Plan {
         let mode = resolve_mode(opts)?;
         let engine = match engine {
             Some(engine) => engine,
-            None => Engine::get(opts.runtime.as_deref())?,
+            None => Engine::get(opts.runtime.as_deref(), prefix())?,
         };
         if opts.oci_runtime.is_some() && !engine.kind().takes_oci_runtime() {
             return Err(Error::about(
@@ -1263,7 +1265,7 @@ impl Plan {
                 if runtime == ours {
                     Ok(self.engine.clone())
                 } else {
-                    Engine::get(Some(runtime))
+                    Engine::get(Some(runtime), prefix())
                 }
             },
             &|m| self.note(m),
@@ -1298,7 +1300,7 @@ impl Plan {
         setup().map_err(|e| e.or_kind(ErrorKind::Setup))?;
         self.sweep();
         let mut held = Held::default();
-        held.claim(&self.dirs, self.engine.kind().name(), &name, &*self.obs)
+        held.claim(&self.dirs, &self.engine, &name, &*self.obs)
             .map_err(|e| e.or_kind(ErrorKind::Setup))?;
         let timeout = Duration::from_secs(mode.timeout);
         let (verified, gone) = verify(&self.engine, None, &spec, &command, timeout, &*self.obs);
@@ -1339,12 +1341,7 @@ impl Plan {
                 gateway = net.gateway;
                 run_token = token(24)?;
                 self.ensure_image(self.socket.as_ref())?;
-                held.claim(
-                    &self.dirs,
-                    self.engine.kind().name(),
-                    &self.name,
-                    &*self.obs,
-                )?;
+                held.claim(&self.dirs, &self.engine, &self.name, &*self.obs)?;
                 // Outlive the run: the holder going first takes the bridge, and the relay's
                 // address, with it.
                 held.holder = self.engine.hold_network_up(
@@ -1419,12 +1416,7 @@ impl Plan {
             }
             self.sweep();
             if held.record.is_none() {
-                held.claim(
-                    &self.dirs,
-                    self.engine.kind().name(),
-                    &self.name,
-                    &*self.obs,
-                )?;
+                held.claim(&self.dirs, &self.engine, &self.name, &*self.obs)?;
             }
             self.cancelled()?;
             Ok((argv, child_env))
@@ -1512,9 +1504,15 @@ struct Held {
 
 impl Held {
     /// Claims `name` and starts the reaper that deletes it if this process dies holding it.
-    fn claim(&mut self, dirs: &Dirs, runtime: &str, name: &str, obs: &dyn Observer) -> Result<()> {
-        let record = claim(&dirs.runs(), runtime, name)?;
-        self.reaper = Reaper::start(&record, &|m| info(obs, m));
+    fn claim(
+        &mut self,
+        dirs: &Dirs,
+        engine: &Engine,
+        name: &str,
+        obs: &dyn Observer,
+    ) -> Result<()> {
+        let record = claim(&dirs.runs(), engine.kind().name(), name)?;
+        self.reaper = Reaper::start(&record, engine, &|m| info(obs, m));
         self.record = Some(record);
         Ok(())
     }
@@ -1573,7 +1571,8 @@ pub struct Live {
 
 impl Live {
     /// The agent's process: the engine's CLI, with the key or token and the base URL in its
-    /// environment. The caller sets its stdio and starts it.
+    /// environment. The caller sets its stdio and starts it. From this call on, a `Live` dropped
+    /// without [`finish`](Live::finish) keeps its clone, even if the caller never started it.
     pub fn command(&mut self) -> Command {
         self.handed_out = true;
         let mut command = self.plan.engine.command(&self.argv);

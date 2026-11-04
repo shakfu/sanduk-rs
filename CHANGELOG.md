@@ -10,6 +10,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
   Nothing in the library is process-wide: directories are a `Dirs` value, notes go to an `Observer`, and signals are the CLI's. `serde_json/preserve_order` and `toml/preserve_order` are gone. Cargo unified them into every crate linking sanduk, and pma's export round-trip broke on the key order. The relay rewrites a body from `RawValue`s, so untouched values go upstream byte for byte. Recipe and agent `env` keep their file's order, which image tags hash. `runs` moved to `sanduk-container`. Deviations from the plan are recorded in [docs/dev/refactor-as-library.md](docs/dev/refactor-as-library.md).
 
+- **Breaking, `sanduk-container` 0.2.0:** the container prefix is a required `Prefix`, with no default. `Engine::new`, `Engine::with_exec`, `Engine::get`, `runs::sweep` and `testing::Fake::engine` take it, and `Reaper::start` takes the engine. A default of `sanduk-` let a second program compile with sanduk's prefix and sweep sanduk's containers. A prefix must start with a letter and end with `-`: an empty one makes a sweep list every container on the host.
+
+- Each crate has its own version. `sanduk` and `sanduk-cli` share the workspace's, 0.2.0. `sanduk-container` is 0.2.0, and `sanduk-sandbox` stays 0.1.0, unchanged since its release. One shared version would release a crate that did not change.
+
 ### Added
 
 - `sanduk_container::testing::Fake`, behind the `test-util` feature: a Docker engine with no daemon. `Sanduk::engine` takes it, so a caller can test `plan`, `start` and `finish` without Docker.
@@ -36,6 +40,8 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Fixed
 
 - A killed `run` has its containers deleted when it dies, not when the next `run` starts. SIGKILL runs no teardown, and the engine's CLI runs in its own process group, so the agent's container kept running with the worktree mounted until some later run's sweep. A caller that kills sanduk's process group, as pma does at its deadline, left it running every time. Each run now starts a reaper in its own process group, blocked on a pipe the run holds; the pipe closing, at teardown or at death, starts the delete. The reaper is `sh` and the engine's CLI, reading a names file beside the run record, so it works under any host binary. A detached reaper over a container-side watchdog: the engine's CLI and the image stay unchanged, and every engine gets it.
+
+- A sweep read a record naming another prefix's container as already gone, and deleted the record. It keeps it now.
 
 ## [0.1.0]
 

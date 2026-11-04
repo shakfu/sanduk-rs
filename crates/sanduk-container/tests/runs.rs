@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 
 use sanduk_container::runs::{self, Reaper, claim, owner_alive, sweep_with};
-use sanduk_container::{Captured, Engine, Exec, Kind};
+use sanduk_container::{Captured, Engine, Exec, Kind, Prefix};
 use serde_json::Value;
 
 /// A docker CLI holding `containers`, or one whose daemon is down.
@@ -58,8 +58,18 @@ fn fake(containers: &[&str], reachable: bool) -> Arc<Fake> {
     })
 }
 
+fn sanduk() -> Prefix {
+    Prefix::new("sanduk-").unwrap()
+}
+
 fn engine_of(f: &Arc<Fake>) -> impl Fn(&str) -> sanduk_container::Result<Engine> + '_ {
-    move |_| Ok(Engine::with_exec(Kind::Docker, f.clone()))
+    move |_| Ok(Engine::with_exec(Kind::Docker, f.clone(), sanduk()))
+}
+
+/// An engine whose reaper calls the stub `cli`.
+fn reaps_with(cli: &std::path::Path) -> Engine {
+    let exec = Arc::new(ReapsWith(cli.to_str().unwrap().into()));
+    Engine::with_exec(Kind::Docker, exec, sanduk())
 }
 
 thread_local! {
@@ -203,7 +213,7 @@ fn a_record_naming_an_unknown_engine_is_left_alone() {
     let _s = State::new("unknown");
     claim(&runs_dir(), "nosuch", "sanduk-abcd").unwrap();
     rewrite("sanduk-abcd", "pid", dead_pid().into());
-    assert!(runs::sweep(&runs_dir(), &|_| {}).is_empty());
+    assert!(runs::sweep(&runs_dir(), &sanduk(), &|_| {}).is_empty());
     assert_eq!(records(), 1);
 }
 
@@ -265,7 +275,7 @@ fn a_reaper_deletes_its_record_s_containers_whoever_owns_them() {
         std::fs::read_to_string(run.names_path()).unwrap(),
         "sanduk-abcd\nsanduk-hold-ef\n"
     );
-    let reaper = Reaper::start_as(&run, cli.to_str().unwrap(), "rm", &|_| {}).unwrap();
+    let reaper = Reaper::start(&run, &reaps_with(&cli), &|_| {}).unwrap();
     assert_eq!(
         stub_read(&cli, "log"),
         "",
@@ -276,13 +286,51 @@ fn a_reaper_deletes_its_record_s_containers_whoever_owns_them() {
     assert_eq!((records(), files("names")), (0, 0));
 }
 
+/// An engine whose reaper calls the CLI it holds, and which answers nothing else.
+struct ReapsWith(String);
+
+impl Exec for ReapsWith {
+    fn run(&self, argv: &[String], _capture: bool) -> Captured {
+        panic!("the reaper ran {argv:?} through the engine, not its own shell")
+    }
+
+    fn which(&self, _: &str) -> bool {
+        true
+    }
+
+    fn reaper_cli(&self) -> Option<&str> {
+        Some(&self.0)
+    }
+}
+
+/// An engine sweeps only its own prefix: a record naming another's container is not its to judge.
+#[test]
+fn a_sweep_leaves_another_prefixs_containers_and_records_alone() {
+    let _s = State::new("prefix");
+    let f = fake(&["sanduk-abcd", "pma-abcd"], true);
+    claim(&runs_dir(), "docker", "sanduk-abcd").unwrap();
+    claim(&runs_dir(), "docker", "pma-abcd").unwrap();
+    rewrite("sanduk-abcd", "pid", dead_pid().into());
+    rewrite("pma-abcd", "pid", dead_pid().into());
+    let pma = |_: &str| {
+        Ok(Engine::with_exec(
+            Kind::Docker,
+            f.clone(),
+            Prefix::new("pma-")?,
+        ))
+    };
+    assert_eq!(sweep_with(&runs_dir(), pma, &|_| {}), ["pma-abcd"]);
+    assert_eq!(*f.deleted.lock().unwrap(), ["pma-abcd"]);
+    assert_eq!(records(), 1);
+}
+
 /// A run that tore down released its record before the reaper woke.
 #[test]
 fn a_reaper_of_a_released_record_deletes_nothing() {
     let _s = State::new("reapreleased");
     let cli = stub_cli(&["sanduk-abcd"]);
     let run = claim(&runs_dir(), "docker", "sanduk-abcd").unwrap();
-    let reaper = Reaper::start_as(&run, cli.to_str().unwrap(), "rm", &|_| {}).unwrap();
+    let reaper = Reaper::start(&run, &reaps_with(&cli), &|_| {}).unwrap();
     run.release();
     drop(reaper);
     assert_eq!(stub_read(&cli, "log"), "");
@@ -297,7 +345,7 @@ fn a_reaper_keeps_the_record_of_a_container_it_could_not_delete() {
     let cli = stub_cli(&["sanduk-stuck-1"]);
     let mut run = claim(&runs_dir(), "docker", "sanduk-gone").unwrap();
     run.add("sanduk-stuck-1").unwrap();
-    drop(Reaper::start_as(&run, cli.to_str().unwrap(), "rm", &|_| {}).unwrap());
+    drop(Reaper::start(&run, &reaps_with(&cli), &|_| {}).unwrap());
     assert_eq!(stub_read(&cli, "alive"), "sanduk-stuck-1\n");
     assert_eq!((records(), files("names")), (1, 1));
 }

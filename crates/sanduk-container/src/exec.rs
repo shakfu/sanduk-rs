@@ -34,6 +34,12 @@ pub trait Exec: Send + Sync {
         command.args(argv.iter().skip(1));
         command
     }
+
+    /// The program a [`Reaper`](crate::runs::Reaper) calls in place of the engine's CLI. `None`
+    /// for the engine's own.
+    fn reaper_cli(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// The real thing: `std::process::Command`, never a shell.

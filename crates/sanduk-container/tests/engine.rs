@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use sanduk_container::{
-    Captured, ContainerSpec, Engine, Exec, HOLDER_SECONDS, Kind, Mount, Network, default_kind,
-    wait_for_gateway,
+    Captured, ContainerSpec, Engine, Exec, HOLDER_SECONDS, Kind, Mount, Network, Prefix,
+    default_kind, wait_for_gateway,
 };
 
 type Reply = Box<dyn Fn(&[String]) -> Captured + Send + Sync>;
@@ -39,6 +39,10 @@ fn answer(code: i32, stdout: &str) -> Captured {
     }
 }
 
+fn sanduk() -> Prefix {
+    Prefix::new("sanduk-").unwrap()
+}
+
 /// An engine whose every command gets the same answer, and the record of what it ran.
 fn engine(kind: Kind, code: i32, stdout: &str) -> (Engine, Arc<Fake>) {
     let stdout = stdout.to_string();
@@ -54,7 +58,7 @@ fn engine_with(
         reply: Box::new(reply),
         on_path: true,
     });
-    let engine = Engine::with_exec(kind, fake.clone()).poll_interval(Duration::ZERO);
+    let engine = Engine::with_exec(kind, fake.clone(), sanduk()).poll_interval(Duration::ZERO);
     (engine, fake)
 }
 
@@ -63,7 +67,7 @@ fn calls(fake: &Fake) -> Vec<Vec<String>> {
 }
 
 fn argv(kind: Kind, spec: &ContainerSpec) -> Vec<String> {
-    Engine::new(kind).run_argv(spec)
+    Engine::new(kind, sanduk()).run_argv(spec)
 }
 
 fn after<'a>(argv: &'a [String], flag: &str) -> &'a str {
@@ -109,12 +113,15 @@ fn the_default_runtime_is_the_first_installed_for_the_platform() {
 
 #[test]
 fn an_explicit_runtime_is_not_cascaded() {
-    assert_eq!(Engine::get(Some("apple")).unwrap().cli(), "container");
+    assert_eq!(
+        Engine::get(Some("apple"), sanduk()).unwrap().cli(),
+        "container"
+    );
 }
 
 #[test]
 fn unknown_runtime_names_the_known_ones() {
-    let err = Engine::get(Some("nerdctl")).unwrap_err();
+    let err = Engine::get(Some("nerdctl"), sanduk()).unwrap_err();
     assert!(err.0.contains("apple, docker"), "{err}");
 }
 
@@ -570,6 +577,25 @@ fn the_holder_sleeps_as_long_as_it_is_told() {
     assert_eq!(calls[1].last().unwrap(), &HOLDER_SECONDS.to_string());
 }
 
+/// Two programs on one host name their containers apart, so neither sweeps the other's.
+#[test]
+fn an_engine_names_its_holder_from_its_prefix() {
+    let (e, fake) = engine(Kind::Apple, 0, "");
+    let e = Engine::with_exec(e.kind(), fake.clone(), Prefix::new("pma-").unwrap());
+    let holder = e.hold_network_up("pma-net", "img", 60).unwrap().unwrap();
+    assert!(holder.starts_with("pma-hold-"), "{holder}");
+    assert_eq!(after(&calls(&fake)[0], "--name"), holder);
+}
+
+/// An empty prefix would match every container on the host.
+#[test]
+fn a_prefix_that_could_match_anothers_containers_is_refused() {
+    for bad in ["", "-", "pma", "Pma-", "1pma-", "pma net-", "pma_-"] {
+        assert!(Prefix::new(bad).is_err(), "{bad:?}");
+    }
+    assert_eq!(Prefix::new("pma-box-").unwrap().as_str(), "pma-box-");
+}
+
 #[test]
 fn a_holder_that_will_not_start_is_an_error() {
     let (e, _) = engine(Kind::Apple, 1, "");
@@ -657,7 +683,7 @@ fn destroy_stops_then_deletes_and_reports_a_failed_delete() {
 #[test]
 fn a_shell_mounts_nothing_and_joins_no_network() {
     assert_eq!(
-        Engine::new(Kind::Docker).shell_argv("img"),
+        Engine::new(Kind::Docker, sanduk()).shell_argv("img"),
         ["docker", "run", "--rm", "-it", "--entrypoint", "sh", "img"]
     );
 }
@@ -722,7 +748,7 @@ fn a_native_docker_daemon_can_run_an_agent() {
 fn an_engine_without_a_service_command_says_so() {
     let (e, fake) = engine(Kind::Docker, 0, "");
     for result in [e.service_start(), e.service_stop()] {
-        assert!(result.unwrap_err().0.contains("managed outside sanduk"));
+        assert!(result.unwrap_err().0.contains("managed by the system"));
     }
     assert!(calls(&fake).is_empty());
 }
@@ -742,7 +768,7 @@ fn service_status_answers_rather_than_failing() {
         reply: Box::new(|_| answer(0, "")),
         on_path: false,
     });
-    let e = Engine::with_exec(Kind::Docker, fake);
+    let e = Engine::with_exec(Kind::Docker, fake, sanduk());
     assert!(e.service_status().contains("not found on PATH"));
 }
 

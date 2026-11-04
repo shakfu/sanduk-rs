@@ -11,6 +11,9 @@
 //!
 //! Nothing here prints. What Python sanduk reported as it went is returned instead, for the
 //! caller to report or act on.
+//!
+//! Every engine names its containers from a caller's [`Prefix`], with no default. Two programs
+//! on one host then never touch each other's holders, sweeps or reapers.
 
 mod daemon;
 mod exec;
@@ -29,11 +32,43 @@ use serde_json::Value;
 pub use daemon::docker_daemon_error;
 pub use exec::{Captured, Exec, System};
 
-/// Every container sanduk starts is named from this, and every container it will stop or delete
-/// is found by it. Nothing else is touched.
-pub const CONTAINER_PREFIX: &str = "sanduk-";
+/// What every container an [`Engine`] starts is named from, and what a sweep finds containers by.
+/// Nothing else is touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Prefix(String);
 
-/// Set by every shipped Containerfile to the uid its agent runs as.
+impl Prefix {
+    /// Lowercase letters, digits and `-`, starting with a letter and ending with `-`. An empty
+    /// prefix would match every container on the host.
+    pub fn new(prefix: &str) -> Result<Prefix> {
+        let bytes = prefix.as_bytes();
+        let shaped = bytes.first().is_some_and(u8::is_ascii_lowercase)
+            && bytes.last() == Some(&b'-')
+            && bytes
+                .iter()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-');
+        if !shaped {
+            return fail(format!(
+                "container prefix {prefix:?}: expected lowercase letters, digits and '-', starting with a letter and ending with '-'"
+            ));
+        }
+        Ok(Prefix(prefix.into()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for Prefix {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The image label every Containerfile sets to the uid its agent runs as, and
+/// [`Engine::image_uid`] reads. Part of the image format, not a namespace: renaming it changes
+/// every existing image, so callers share it.
 pub const AGENT_UID_LABEL: &str = "sanduk.agent-uid";
 
 /// How long the network holder sleeps when the caller does not say. `run` sizes it to the run.
@@ -302,26 +337,36 @@ pub struct Engine {
     kind: Kind,
     exec: Arc<dyn Exec>,
     poll: Duration,
+    prefix: Prefix,
 }
 
 impl fmt::Debug for Engine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Engine").field("kind", &self.kind).finish()
+        f.debug_struct("Engine")
+            .field("kind", &self.kind)
+            .field("prefix", &self.prefix)
+            .finish()
     }
 }
 
 impl Engine {
-    pub fn new(kind: Kind) -> Self {
-        Self::with_exec(kind, Arc::new(System))
+    pub fn new(kind: Kind, prefix: Prefix) -> Self {
+        Self::with_exec(kind, Arc::new(System), prefix)
     }
 
     /// An engine whose commands `exec` answers.
-    pub fn with_exec(kind: Kind, exec: Arc<dyn Exec>) -> Self {
+    pub fn with_exec(kind: Kind, exec: Arc<dyn Exec>, prefix: Prefix) -> Self {
         Self {
             kind,
             exec,
             poll: Duration::from_millis(500),
+            prefix,
         }
+    }
+
+    /// The prefix every container this engine starts is named from.
+    pub fn prefix(&self) -> &str {
+        self.prefix.as_str()
     }
 
     /// How long to wait between polls for a network another run is creating.
@@ -331,12 +376,12 @@ impl Engine {
     }
 
     /// The named engine, or this platform's default.
-    pub fn get(name: Option<&str>) -> Result<Self> {
+    pub fn get(name: Option<&str>, prefix: Prefix) -> Result<Self> {
         let kind = match name {
             Some(name) => Kind::from_name(name)?,
             None => default_kind(std::env::consts::OS, |cli| System.which(cli)),
         };
-        Ok(Self::new(kind))
+        Ok(Self::new(kind, prefix))
     }
 
     pub fn kind(&self) -> Kind {
@@ -345,6 +390,11 @@ impl Engine {
 
     pub fn cli(&self) -> &'static str {
         self.kind.cli()
+    }
+
+    /// The CLI this engine's reaper calls: its own, unless the [`Exec`] names a stand-in.
+    pub fn reaper_cli(&self) -> &str {
+        self.exec.reaper_cli().unwrap_or(self.kind.cli())
     }
 
     fn argv(&self, args: &[&str]) -> Vec<String> {
@@ -442,7 +492,7 @@ impl Engine {
 
     fn unmanaged(&self) -> Error {
         Error(format!(
-            "{}'s service is managed outside sanduk. Start or stop it the way your system does.",
+            "{}'s service is managed by the system. Start or stop it the way your system does.",
             self.cli()
         ))
     }
@@ -532,7 +582,7 @@ impl Engine {
         build_args(self.kind, uid, gid)
     }
 
-    /// The agent's uid from the image's label, or `None` if it has none.
+    /// The agent's uid from the image's [`AGENT_UID_LABEL`], or `None` if it has none.
     pub fn image_uid(&self, image: &str) -> Option<u32> {
         if self.kind != Kind::Docker {
             return None;
@@ -721,7 +771,7 @@ impl Engine {
             detach: true,
             entrypoint: Some("sleep".into()),
             command: vec![seconds.to_string()],
-            ..ContainerSpec::new(format!("{CONTAINER_PREFIX}hold-{}", short_id()), image)
+            ..ContainerSpec::new(format!("{}hold-{}", self.prefix, short_id()), image)
         };
         let r = self.exec.run(&self.run_argv(&spec), true);
         if !r.success() {

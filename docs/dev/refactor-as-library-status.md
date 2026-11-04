@@ -26,10 +26,10 @@ On macOS, against fakes:
 
 On Linux (Ubuntu, rootful Docker 29.9.3, `/bin/sh` is dash), 2026-11-04:
 
-- `make test`: 336 pass, 0 fail, 6 ignored. The 7 tests under `#[cfg(target_os = "macos")]` in `crates/sanduk-sandbox/tests/policy.rs` do not build here; one Linux-only test is new.
+- `make test`: 338 pass, 0 fail, 7 ignored. The 7 tests under `#[cfg(target_os = "macos")]` in `crates/sanduk-sandbox/tests/policy.rs` do not build here; one Linux-only test is new.
 - `make lint`: clean.
-- `make live`: 6 pass, real Docker and a real TLS call. No container is left after either suite.
-- CI for `031bb4e`: Ubuntu passes. macOS was still queued at the time of writing.
+- `make live`: 7 pass, real Docker and a real TLS call. No container is left after either suite.
+- CI for `031bb4e`: Ubuntu passes. The macOS job was cancelled in the queue.
 
 Two tests failed on Linux. Both were test bugs; the code was right:
 
@@ -42,13 +42,12 @@ Linux paths macOS did not exercise:
 |-|-|
 | The uid check, `Detail::AgentUid` | `an_image_whose_agent_cannot_write_the_workdir_says_why_as_data`, under `Fake` |
 | The host-listener warning | `a_sealed_run_names_host_ports_listening_on_every_address` (`crates/sanduk-cli/tests/cli.rs`), new, Linux only. It binds a port on every address and one on loopback; the warning must name the first only. It fails when the LISTEN check in `wildcard_listeners` is broken. Only sealed mode reaches the warning: `key-safe` has egress |
-| `REAP` under dash | the three `a_reaper_*` tests in `crates/sanduk-container/tests/runs.rs`, with a stub CLI |
+| `REAP` under dash | the `a_reaper_*` tests in `crates/sanduk-container/tests/runs.rs`, with a stub CLI; `a_reaper_deletes_a_running_container_when_its_run_ends` in `tests/live.rs`, with real Docker |
 | A killed run's process group | `a_killed_run_has_its_container_deleted_without_waiting_for_another_run`, with the fake docker |
 | Landlock | `crates/sanduk-sandbox` tests, unchanged by the refactor; they pass |
 
 ## Not verified
 
-- The reaper against real Docker. Its tests use a stub CLI; `make live` does not start one.
 - The CLI's rebuild hint (`with_rebuild` in `crates/sanduk-cli/src/run.rs`) on Linux with a real image of another uid.
 - The Apple engine's network holder path. No test covers it.
 - Build time and binary size against pma. Only crate counts were measured (`cargo tree -e normal`): `sanduk` 89, `sanduk-cli` 116.
@@ -56,11 +55,10 @@ Linux paths macOS did not exercise:
 
 ## Next
 
-1. Commit the Linux test fixes; check the macOS CI job.
-2. Try the API from pma on a branch.
-3. Decide on publishing.
+1. Check the macOS CI job. It has not run since the refactor: both runs were cancelled in the queue.
+2. pma copied the library as `pma-box` instead of calling it. sanduk-rs now keeps `sanduk-sandbox` and `sanduk-container` stable for other programs: [shared-core.md](shared-core.md).
+3. Decide on publishing `sanduk-container`.
 
 ## Known gaps
 
-- Under `Fake`, the reaper still calls `docker` from `PATH`. On a Linux host with a running daemon, the calls reach it. A record left behind by a test, after a failed fake delete or a killed process, sends `docker stop` and `docker rm` to the real CLI. The names do not exist, so this is harmless, but it is not isolated. The fix: let `Fake` name a stand-in CLI for the reaper.
 - `sanduk build` and `run` lost Docker's live progress display: build output is a pipe to the observer now. To get it back for the CLI only, keep the attached `Engine::build_image` for `sanduk build`.
