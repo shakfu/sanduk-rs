@@ -377,6 +377,9 @@ fn the_check_runs_only_after_an_agent_that_finished() {
 #[test]
 fn an_image_whose_agent_cannot_write_the_workdir_says_why_as_data() {
     let w = World::new("agentuid");
+    // A group-writable workdir is not a sure refusal; fix the mode so the umask cannot decide.
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(w.work(), std::fs::Permissions::from_mode(0o755)).unwrap();
     let plan = w.sanduk().plan(w.options()).unwrap();
     let tag = plan.image().tag.clone();
     // SAFETY: getuid takes no arguments and cannot fail.

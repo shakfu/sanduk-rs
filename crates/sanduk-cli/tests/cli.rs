@@ -1094,6 +1094,37 @@ fn a_sealed_run_probes_the_relay_first() {
     assert_eq!(w.containers(), "");
 }
 
+/// A sealed container reaches host services bound to every address, past the relay; the run names
+/// them. One bound to loopback is out of reach and goes unnamed. Linux only: it reads `/proc`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_sealed_run_names_host_ports_listening_on_every_address() {
+    let open = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    let local = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let (open, local) = (
+        open.local_addr().unwrap().port(),
+        local.local_addr().unwrap().port(),
+    );
+    let w = World::new("listeners");
+    w.agent(&say(RESULT));
+    let out = w.run(&["--mode", "sealed"]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let err = stderr(&out);
+    let line = err
+        .lines()
+        .find(|l| l.contains("WARNING host TCP ports"))
+        .unwrap_or_else(|| panic!("no warning: {err}"));
+    let ports: Vec<&str> = line
+        .trim_start_matches(|c: char| !c.is_ascii_digit())
+        .split(" listen")
+        .next()
+        .unwrap()
+        .split(", ")
+        .collect();
+    assert!(ports.contains(&open.to_string().as_str()), "{line}");
+    assert!(!ports.contains(&local.to_string().as_str()), "{line}");
+}
+
 /// A firewall that drops the container's connection: the run stops in seconds with the likely
 /// cause, where the agent would have hung until --timeout, and gives back everything it held.
 #[test]

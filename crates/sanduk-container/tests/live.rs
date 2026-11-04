@@ -46,6 +46,12 @@ fn a_container_runs_its_command_with_the_workdir_mounted() {
         mount: Some((std::fs::canonicalize(&work).unwrap(), "/work".into())),
         entrypoint: Some("sh".into()),
         command: vec!["-c".into(), "cat in.txt && echo from box > out.txt".into()],
+        // Where the mount keeps host ownership, root without capabilities cannot write it.
+        // SAFETY: getuid takes no arguments and cannot fail.
+        user: engine
+            .kind()
+            .keeps_mount_owner()
+            .then(|| unsafe { libc::getuid() }.to_string()),
         ..ContainerSpec::new(unique("run"), image())
     };
     let out = run(&engine, &spec);
