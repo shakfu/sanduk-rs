@@ -31,7 +31,9 @@ use hyper::server::conn::http1 as server;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use serde_json::{Map, Value};
+use indexmap::IndexMap;
+use serde_json::Value;
+use serde_json::value::RawValue;
 use tokio::net::TcpListener;
 use tokio::sync::{OwnedMutexGuard, mpsc, oneshot};
 
@@ -119,7 +121,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// The provider's routes, host and scheme; no body policy; notes to stderr.
+    /// The provider's routes, host and scheme; no body policy; notes discarded.
     pub fn new(
         provider: &'static Provider,
         api_key: impl Into<String>,
@@ -142,7 +144,7 @@ impl Config {
             max_tokens_cap: None,
             budget: None,
             max_body: DEFAULT_MAX_BODY,
-            note: Arc::new(|msg| eprintln!("proxy: {msg}")),
+            note: Arc::new(|_| {}),
         }
     }
 
@@ -392,7 +394,7 @@ async fn relay(state: Arc<State>, peer: SocketAddr, req: Request<Incoming>) -> R
             if stats.unpriced > 0 {
                 let why = format!(
                     "{} call(s) reported no cost, so ${:.4} is a floor rather than a total and a \
-                     ${budget:.4} ceiling cannot be enforced. Re-run without --budget to continue",
+                     ${budget:.4} ceiling cannot be enforced. Re-run without a budget to continue",
                     stats.unpriced, stats.spent
                 );
                 return refuse(&state, &line, 402, &why);
@@ -635,8 +637,22 @@ async fn send(state: &State, req: Request<Full<Bytes>>) -> Result<Response<Incom
     crate::http::send(state.cfg.scheme, &state.cfg.upstream, req).await
 }
 
+/// A JSON object's members in their own order, each value as the bytes it was sent as.
+type Members = IndexMap<String, Box<RawValue>>;
+
+fn parsed(raw: &RawValue) -> Option<Value> {
+    serde_json::from_str(raw.get()).ok()
+}
+
+fn raw(value: &impl serde::Serialize) -> Result<Box<RawValue>, (u16, String)> {
+    serde_json::value::to_raw_value(value).map_err(|e| (400, e.to_string()))
+}
+
 /// Enforces model and token limits where the container cannot edit them, and adds what the
 /// provider needs to report streamed usage. `Err` is a refusal: status and reason.
+///
+/// Only the members the policy reads are parsed, and only those it changes are written anew:
+/// every other value goes upstream byte for byte.
 fn apply_policy(
     cfg: &Config,
     protocol: Option<&'static Protocol>,
@@ -649,27 +665,33 @@ fn apply_policy(
     if body.is_empty() || (!policed && !cfg.provider.stream_usage_option) {
         return Ok(body);
     }
-    let Ok(mut payload) = serde_json::from_slice::<Value>(&body) else {
-        return Err((400, "body is not JSON".into()));
-    };
-    let Some(obj) = payload.as_object_mut() else {
-        return Err((400, "body is not a JSON object".into()));
+    let Ok(mut obj) = serde_json::from_slice::<Members>(&body) else {
+        return Err(
+            if serde_json::from_slice::<serde::de::IgnoredAny>(&body).is_ok() {
+                (400, "body is not a JSON object".into())
+            } else {
+                (400, "body is not JSON".into())
+            },
+        );
     };
     if let Some(models) = &cfg.allow_models {
-        let model = obj.get("model");
+        let model = obj.get("model").map(|m| parsed(m).unwrap_or(Value::Null));
         if !model
+            .as_ref()
             .and_then(Value::as_str)
             .is_some_and(|m| models.contains(m))
         {
-            let named = model.map_or_else(|| "none".into(), Value::to_string);
+            let named = model.map_or_else(|| "none".into(), |m| m.to_string());
             return Err((403, format!("model {named} not allowed")));
         }
     }
     let mut edited = false;
     if let Some(cap) = cfg.max_tokens_cap {
-        let asked = obj.get(protocol.cap_field).and_then(Value::as_u64);
+        let asked = obj
+            .get(protocol.cap_field)
+            .and_then(|v| parsed(v)?.as_u64());
         if asked.is_none_or(|asked| asked > cap) {
-            obj.insert(protocol.cap_field.into(), cap.into());
+            obj.insert(protocol.cap_field.into(), raw(&cap)?);
             edited = true;
         }
     }
@@ -677,22 +699,25 @@ fn apply_policy(
     // final event unasked.
     if cfg.provider.stream_usage_option
         && protocol.name == OPENAI_CHAT
-        && obj.get("stream").is_some_and(truthy)
+        && obj
+            .get("stream")
+            .and_then(|v| parsed(v))
+            .is_some_and(|v| truthy(&v))
     {
-        let mut options = match obj.get("stream_options") {
-            Some(Value::Object(options)) => options.clone(),
-            _ => Map::new(),
-        };
-        if options.get("include_usage") != Some(&Value::Bool(true)) {
-            options.insert("include_usage".into(), Value::Bool(true));
-            obj.insert("stream_options".into(), Value::Object(options));
+        let mut options: Members = obj
+            .get("stream_options")
+            .and_then(|v| serde_json::from_str(v.get()).ok())
+            .unwrap_or_default();
+        if options.get("include_usage").and_then(|v| parsed(v)) != Some(Value::Bool(true)) {
+            options.insert("include_usage".into(), raw(&true)?);
+            obj.insert("stream_options".into(), raw(&options)?);
             edited = true;
         }
     }
     if !edited {
         return Ok(body);
     }
-    serde_json::to_vec(&payload)
+    serde_json::to_vec(&obj)
         .map(Bytes::from)
         .map_err(|e| (400, e.to_string()))
 }

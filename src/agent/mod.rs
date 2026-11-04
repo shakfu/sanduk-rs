@@ -15,7 +15,6 @@
 //!
 //! See docs/agents.md.
 
-pub mod launch;
 pub mod stream;
 pub mod template;
 
@@ -27,6 +26,7 @@ use serde::Deserialize;
 use crate::catalog::{self, Kind, NAME_RE, Origin};
 use crate::error::{Error, Result};
 use crate::providers::{Provider, Scheme, protocol};
+use crate::util::Dirs;
 use template::{Template, Vars};
 
 pub use stream::Outcome;
@@ -58,14 +58,15 @@ pub struct Options {
     pub base_url_env: Option<String>,
 }
 
-/// The options a spec's `require`, `refuse` and `when` may name, and the flag each came from.
-const OPTIONS: [(&str, &str); 6] = [
-    ("model", "--model"),
-    ("effort", "--effort"),
-    ("max_turns", "--max-turns"),
-    ("permission_mode", "--permission-mode"),
-    ("allowed_tools", "--allowed-tools"),
-    ("bare", "--bare"),
+/// The options a spec's `require`, `refuse` and `when` may name: [`run::Options`](crate::run::Options)
+/// fields.
+const OPTIONS: [&str; 6] = [
+    "model",
+    "effort",
+    "max_turns",
+    "permission_mode",
+    "allowed_tools",
+    "bare",
 ];
 
 /// Variables every template may read, before the spec's own `[vars]`.
@@ -149,8 +150,149 @@ struct WireFile {
     key_env: String,
     base_url_env: String,
     base_url: Option<String>,
+    /// Keyed with their spans: without toml's `preserve_order`, which would leak into every crate
+    /// that links this one, the span is what keeps the file's order.
     #[serde(default)]
-    env: toml::Table,
+    env: BTreeMap<toml::Spanned<String>, EnvFile>,
+}
+
+/// A `wire.env` value as written: a string, `{ json = ... }`, or anything else, refused later
+/// with the variable's name.
+#[derive(Debug)]
+enum EnvFile {
+    Text(String),
+    Json(Doc),
+    Other,
+}
+
+impl<'de> Deserialize<'de> for EnvFile {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = EnvFile;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a string, or { json = ... }")
+            }
+            fn visit_str<E>(self, v: &str) -> std::result::Result<EnvFile, E> {
+                Ok(EnvFile::Text(v.into()))
+            }
+            fn visit_bool<E>(self, _: bool) -> std::result::Result<EnvFile, E> {
+                Ok(EnvFile::Other)
+            }
+            fn visit_i64<E>(self, _: i64) -> std::result::Result<EnvFile, E> {
+                Ok(EnvFile::Other)
+            }
+            fn visit_f64<E>(self, _: f64) -> std::result::Result<EnvFile, E> {
+                Ok(EnvFile::Other)
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<EnvFile, A::Error> {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(EnvFile::Other)
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<EnvFile, A::Error> {
+                let (mut doc, mut others) = (None, 0);
+                while let Some(key) = map.next_key::<String>()? {
+                    if key == "json" && doc.is_none() {
+                        doc = Some(map.next_value::<Doc>()?);
+                    } else {
+                        map.next_value::<serde::de::IgnoredAny>()?;
+                        others += 1;
+                    }
+                }
+                Ok(match doc {
+                    Some(doc) if others == 0 => EnvFile::Json(doc),
+                    _ => EnvFile::Other,
+                })
+            }
+        }
+        d.deserialize_any(Visit)
+    }
+}
+
+/// A JSON document in the order its TOML was written. Object keys are read with their spans and
+/// sorted by them: toml's own tables are sorted maps without `preserve_order`.
+#[derive(Debug, Clone, PartialEq)]
+enum Doc {
+    Scalar(serde_json::Value),
+    Array(Vec<Doc>),
+    Object(Vec<(String, Doc)>),
+}
+
+impl<'de> Deserialize<'de> for Doc {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        struct Visit;
+        impl<'de> serde::de::Visitor<'de> for Visit {
+            type Value = Doc;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a TOML value")
+            }
+            fn visit_bool<E>(self, v: bool) -> std::result::Result<Doc, E> {
+                Ok(Doc::Scalar(v.into()))
+            }
+            fn visit_i64<E>(self, v: i64) -> std::result::Result<Doc, E> {
+                Ok(Doc::Scalar(v.into()))
+            }
+            fn visit_u64<E>(self, v: u64) -> std::result::Result<Doc, E> {
+                Ok(Doc::Scalar(v.into()))
+            }
+            fn visit_f64<E>(self, v: f64) -> std::result::Result<Doc, E> {
+                Ok(Doc::Scalar(v.into()))
+            }
+            fn visit_str<E>(self, v: &str) -> std::result::Result<Doc, E> {
+                Ok(Doc::Scalar(v.into()))
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<Doc, A::Error> {
+                let mut items = Vec::new();
+                while let Some(item) = seq.next_element()? {
+                    items.push(item);
+                }
+                Ok(Doc::Array(items))
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<Doc, A::Error> {
+                let mut members: Vec<(toml::Spanned<String>, Doc)> = Vec::new();
+                while let Some(key) = map.next_key()? {
+                    members.push((key, map.next_value()?));
+                }
+                members.sort_by_key(|(k, _)| k.span().start);
+                Ok(Doc::Object(
+                    members
+                        .into_iter()
+                        .map(|(k, v)| (k.into_inner(), v))
+                        .collect(),
+                ))
+            }
+        }
+        d.deserialize_any(Visit)
+    }
+}
+
+impl serde::Serialize for Doc {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            Doc::Scalar(v) => v.serialize(s),
+            Doc::Array(items) => s.collect_seq(items),
+            Doc::Object(members) => {
+                let mut map = s.serialize_map(Some(members.len()))?;
+                for (k, v) in members {
+                    map.serialize_entry(k, v)?;
+                }
+                map.end()
+            }
+        }
+    }
 }
 
 // --- the resolved spec ------------------------------------------------------------------------------
@@ -169,7 +311,7 @@ enum Item {
 enum EnvValue {
     Text(Template),
     /// A JSON document: keys and string leaves are templates, serialised compactly.
-    Json(serde_json::Value),
+    Json(Doc),
 }
 
 #[derive(Debug, Clone)]
@@ -227,13 +369,13 @@ pub struct Endpoint<'a> {
 }
 
 /// Every name the catalogue can find.
-pub fn names() -> Result<Vec<String>> {
-    catalog::names(Kind::Agents)
+pub fn names(dirs: &Dirs) -> Result<Vec<String>> {
+    catalog::names(dirs, Kind::Agents)
 }
 
 /// An agent by catalogue name, or by path to its file.
-pub fn get(spec: &str) -> Result<Agent> {
-    let (path, origin) = catalog::locate(Kind::Agents, spec, None)?;
+pub fn get(dirs: &Dirs, spec: &str) -> Result<Agent> {
+    let (path, origin) = catalog::locate(dirs, Kind::Agents, spec, None)?;
     load(&path, origin)
 }
 
@@ -279,7 +421,7 @@ fn load(path: &Path, origin: Origin) -> Result<Agent> {
         }
     };
     for name in file.check.require.iter().chain(&file.check.refuse) {
-        if !OPTIONS.iter().any(|(o, _)| o == name) {
+        if !OPTIONS.contains(&name.as_str()) {
             return Err(bad(format!("check names {name:?}, which is not an option")));
         }
     }
@@ -346,17 +488,20 @@ fn load(path: &Path, origin: Origin) -> Result<Agent> {
     known.extend(WIRE_VARS.iter().map(|s| s.to_string()));
 
     let mut env = Vec::new();
-    for (name, value) in &file.wire.env {
+    let mut in_order: Vec<_> = file.wire.env.iter().collect();
+    in_order.sort_by_key(|(name, _)| name.span().start);
+    for (name, value) in in_order {
+        let name = name.get_ref();
         let what = format!("wire.env.{name}");
         let value = match value {
-            toml::Value::String(text) => EnvValue::Text(parse(text, &known, &what)?),
-            toml::Value::Table(t) if t.len() == 1 && t.contains_key("json") => {
-                let doc =
-                    serde_json::to_value(&t["json"]).map_err(|e| bad(format!("{what}: {e}")))?;
-                check_json(&doc, &known, &what, &parse)?;
-                EnvValue::Json(doc)
+            EnvFile::Text(text) => EnvValue::Text(parse(text, &known, &what)?),
+            EnvFile::Json(doc) => {
+                check_json(doc, &known, &what, &parse)?;
+                EnvValue::Json(doc.clone())
             }
-            _ => return Err(bad(format!("{what} must be a string, or {{ json = ... }}"))),
+            EnvFile::Other => {
+                return Err(bad(format!("{what} must be a string, or {{ json = ... }}")));
+            }
         };
         env.push((name.clone(), value));
     }
@@ -424,42 +569,38 @@ fn load(path: &Path, origin: Origin) -> Result<Agent> {
 type Parse<'a> = dyn Fn(&str, &[String], &str) -> Result<Template> + 'a;
 
 /// Parses every key and string leaf of a JSON document as a template, to check its names.
-fn check_json(doc: &serde_json::Value, known: &[String], what: &str, parse: &Parse) -> Result<()> {
+fn check_json(doc: &Doc, known: &[String], what: &str, parse: &Parse) -> Result<()> {
     match doc {
-        serde_json::Value::String(s) => parse(s, known, what).map(|_| ()),
-        serde_json::Value::Array(items) => items
+        Doc::Scalar(serde_json::Value::String(s)) => parse(s, known, what).map(|_| ()),
+        Doc::Scalar(_) => Ok(()),
+        Doc::Array(items) => items
             .iter()
             .try_for_each(|v| check_json(v, known, what, parse)),
-        serde_json::Value::Object(map) => map.iter().try_for_each(|(k, v)| {
+        Doc::Object(members) => members.iter().try_for_each(|(k, v)| {
             parse(k, known, what)?;
             check_json(v, known, what, parse)
         }),
-        _ => Ok(()),
     }
 }
 
 /// A JSON document with its templates rendered, or `None` if one reads an unset variable.
-fn render_json(doc: &serde_json::Value, vars: &Vars) -> Option<serde_json::Value> {
-    use serde_json::Value;
+fn render_json(doc: &Doc, vars: &Vars) -> Option<Doc> {
+    let text = |s: &str| Template::parse(s).ok()?.render(vars);
     Some(match doc {
-        Value::String(s) => Value::String(Template::parse(s).ok()?.render(vars)?),
-        Value::Array(items) => Value::Array(
+        Doc::Scalar(serde_json::Value::String(s)) => Doc::Scalar(text(s)?.into()),
+        Doc::Scalar(other) => Doc::Scalar(other.clone()),
+        Doc::Array(items) => Doc::Array(
             items
                 .iter()
                 .map(|v| render_json(v, vars))
                 .collect::<Option<_>>()?,
         ),
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(k, v)| {
-                    Some((
-                        Template::parse(k).ok()?.render(vars)?,
-                        render_json(v, vars)?,
-                    ))
-                })
+        Doc::Object(members) => Doc::Object(
+            members
+                .iter()
+                .map(|(k, v)| Some((text(k)?, render_json(v, vars)?)))
                 .collect::<Option<_>>()?,
         ),
-        other => other.clone(),
     })
 }
 
@@ -513,7 +654,7 @@ impl Agent {
     pub fn check(&self, opts: &Options, provider: &Provider) -> Result<()> {
         if self.protocol(provider).is_none() {
             return Err(Error::new(format!(
-                "{} cannot talk to the {} provider: it speaks {}. Use a different --agent or --provider.",
+                "{} cannot talk to the {} provider: it speaks {}. Choose another agent or provider.",
                 self.name,
                 provider.name,
                 self.protocols.join(", ")
@@ -541,26 +682,25 @@ impl Agent {
             "allowed_tools" => opts.allowed_tools.is_some(),
             _ => opts.bare,
         };
-        let flag = |name: &str| {
+        // An error names its option as a `&'static str`.
+        let option = |name: &str| {
             OPTIONS
-                .iter()
-                .find(|(o, _)| *o == name)
-                .map_or_else(|| name.to_string(), |(_, f)| f.to_string())
+                .into_iter()
+                .find(|o| *o == name)
+                .expect("load refuses a name not in OPTIONS")
         };
         // Dropping one of these silently would weaken a restriction the caller asked for.
         if let Some(name) = self.refuse.iter().find(|n| set(n)) {
-            return Err(Error::new(format!(
-                "{} has no {} equivalent",
-                flag(name),
-                self.name
-            )));
+            return Err(Error::about(
+                option(name),
+                format!("has no {} equivalent", self.name),
+            ));
         }
         if let Some(name) = self.require.iter().find(|n| !set(n)) {
-            return Err(Error::new(format!(
-                "{} is required with --agent {}",
-                flag(name),
-                self.name
-            )));
+            return Err(Error::about(
+                option(name),
+                format!("is required with agent {}", self.name),
+            ));
         }
         Ok(())
     }
@@ -610,7 +750,7 @@ impl Agent {
             .filter_map(|(name, value)| {
                 let rendered = match value {
                     EnvValue::Text(t) => t.render(&vars)?,
-                    EnvValue::Json(doc) => render_json(doc, &vars)?.to_string(),
+                    EnvValue::Json(doc) => serde_json::to_string(&render_json(doc, &vars)?).ok()?,
                 };
                 Some((name.clone(), rendered))
             })

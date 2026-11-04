@@ -86,7 +86,7 @@ One change would make a Linux fix stable: name the bridge interface when creatin
 
 ## Implemented: the probe
 
-`run` probes the relay after it binds and before the agent starts, in `key-safe` and `sealed` modes (`probe_relay` in `src/cli/run.rs`, `Engine::probe` in `sanduk-container`):
+`run` probes the relay after it binds and before the agent starts, in `key-safe` and `sealed` modes (`probe_relay` in `src/run.rs`, `Engine::probe` in `sanduk-container`):
 
 - The relay answers `GET /_sanduk/ping` with 204, with no token; it is not counted in `Stats` or logged.
 - On Apple's engine, `container exec <holder> curl ...`: no new VM. On Docker, a short container on the network, written into the run record before it starts, deleted after.

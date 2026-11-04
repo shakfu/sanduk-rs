@@ -147,7 +147,20 @@ pub fn path_value<'a>(
     Ok(found)
 }
 
-pub fn env_map(value: Option<&Value>, where_: &str) -> Result<EnvMap> {
+/// The keys of the top-level `env` object in `raw`, in the order the file wrote them. Empty when
+/// there is none, or it is not an object, which [`env_map`] refuses.
+pub fn env_order(raw: &[u8]) -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct Top {
+        #[serde(default)]
+        env: indexmap::IndexMap<String, serde::de::IgnoredAny>,
+    }
+    serde_json::from_slice::<Top>(raw).map_or_else(|_| Vec::new(), |t| t.env.into_keys().collect())
+}
+
+/// The `env` object, in `order`: a parsed [`Map`] is sorted, and the ENV line it renders is
+/// hashed into the image tag, which must match the file's order.
+pub fn env_map(value: Option<&Value>, order: &[String], where_: &str) -> Result<EnvMap> {
     let mut out = EnvMap::new();
     let Some(value) = value else {
         return Ok(out);
@@ -155,7 +168,9 @@ pub fn env_map(value: Option<&Value>, where_: &str) -> Result<EnvMap> {
     let Value::Object(map) = value else {
         return Err(fail(where_, "env must be an object"));
     };
-    for (key, v) in map {
+    let mut members: Vec<(&String, &Value)> = map.iter().collect();
+    members.sort_by_key(|(k, _)| order.iter().position(|o| o == *k).unwrap_or(usize::MAX));
+    for (key, v) in members {
         if !ENV_KEY_RE.is_match(key) {
             return Err(fail(where_, format!("env key {key:?} is not allowed here")));
         }

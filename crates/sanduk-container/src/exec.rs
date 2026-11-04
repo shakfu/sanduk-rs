@@ -26,6 +26,14 @@ pub trait Exec: Send + Sync {
 
     /// Whether `program` is an executable on `PATH`.
     fn which(&self, program: &str) -> bool;
+
+    /// The process for `argv`, for a caller that runs it itself: the agent, or a check whose
+    /// output it reads as it comes. `argv[0]` is the program.
+    fn command(&self, argv: &[String]) -> Command {
+        let mut command = Command::new(argv.first().map_or("", String::as_str));
+        command.args(argv.iter().skip(1));
+        command
+    }
 }
 
 /// The real thing: `std::process::Command`, never a shell.

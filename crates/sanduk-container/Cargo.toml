@@ -11,6 +11,10 @@ homepage.workspace = true
 keywords = ["container", "docker", "sandbox"]
 categories = ["command-line-utilities", "os"]
 
+[features]
+# `testing::Fake`: a Docker engine with no daemon, for a caller's tests.
+test-util = []
+
 [dependencies]
 # `network inspect` and `image inspect` answer in JSON. Untyped `Value`: each engine nests the
 # gateway differently, and a missing key reads as an absent network.

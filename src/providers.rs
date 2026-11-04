@@ -332,26 +332,26 @@ pub fn parse_upstream(url: &str, insecure: bool) -> Result<(Scheme, String), Err
         "https" => Scheme::Https,
         other => {
             return Err(Error(format!(
-                "--upstream scheme must be http or https, not {other:?}"
+                "scheme must be http or https, not {other:?}"
             )));
         }
     };
     let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let (netloc, path) = rest.split_at(end);
     if netloc.is_empty() {
-        return Err(Error(format!("--upstream has no host: {url:?}")));
+        return Err(Error(format!("has no host: {url:?}")));
     }
     let path = path.split(['?', '#']).next().unwrap_or("");
     if !path.trim_end_matches('/').is_empty() {
         return Err(Error(format!(
-            "--upstream carries a path ({path:?}). Give scheme://host:port only; path prefixes \
-             belong in --proxy-allow-path and the agent's base URL."
+            "carries a path ({path:?}). Give scheme://host:port only; path prefixes belong in \
+             the allowed paths and the agent's base URL."
         )));
     }
     if scheme == Scheme::Http && !insecure && !is_loopback(netloc) {
         return Err(Error(format!(
-            "refusing plaintext http to {netloc}: the API key would be sent in clear. Use \
-             https, a loopback address, or --insecure-upstream."
+            "is plaintext http to {netloc}, which would send the API key in clear. Use https, a \
+             loopback address, or allow an insecure upstream."
         )));
     }
     Ok((scheme, netloc.to_string()))

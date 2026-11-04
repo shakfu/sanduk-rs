@@ -6,8 +6,26 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rusqlite::Connection;
-use sanduk::assistants::{self as a, Assistant};
-use sanduk::util;
+use sanduk::util::Dirs;
+use sanduk_cli::assistants::{self as a, Assistant};
+
+thread_local! {
+    /// The directories this thread's test points at. The library takes them as a value; a test
+    /// keeps them here so its helpers need no extra argument.
+    static DIRS: std::cell::RefCell<Option<Dirs>> = const { std::cell::RefCell::new(None) };
+}
+
+fn set_dirs(dirs: Option<Dirs>) {
+    DIRS.with(|d| *d.borrow_mut() = dirs);
+}
+
+/// This thread's directories: what a scratch fixture set, else an empty user catalogue.
+fn dirs() -> Dirs {
+    DIRS.with(|d| d.borrow().clone()).unwrap_or_else(|| Dirs {
+        config: std::env::temp_dir().join(format!("sanduk-no-config-{}", std::process::id())),
+        ..Dirs::default()
+    })
+}
 
 const CONFIG: &str = r#"
 name = "triage"
@@ -35,7 +53,10 @@ impl Home {
         let dir = root.join("triage");
         std::fs::write(dir.join("assistant.toml"), CONFIG).unwrap();
         std::fs::write(dir.join("brief.md"), "Triage the inbox.").unwrap();
-        util::override_dirs(None, Some(root.join("state")));
+        set_dirs(Some(Dirs {
+            state: root.join("state"),
+            ..dirs()
+        }));
         Home { root, dir }
     }
 
@@ -52,7 +73,7 @@ impl Home {
     }
 
     fn db(&self) -> Connection {
-        a::connect().unwrap()
+        a::connect(&dirs()).unwrap()
     }
 
     /// Loaded and registered.
@@ -78,7 +99,7 @@ impl Home {
 
 impl Drop for Home {
     fn drop(&mut self) {
-        util::override_dirs(None, None);
+        set_dirs(None);
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
@@ -124,7 +145,7 @@ fn after<'a>(argv: &'a [String], flag: &str) -> &'a str {
 }
 
 fn wake(db: &Connection, found: &Assistant, ran: &Ran) -> i32 {
-    a::wake(db, found, None, &|argv| ran.run(argv)).unwrap()
+    a::wake(db, &dirs(), found, None, &|argv| ran.run(argv)).unwrap()
 }
 
 fn run_rows(db: &Connection) -> Vec<a::Wakeup> {
@@ -368,7 +389,7 @@ fn a_wakeup_runs_the_run_command_records_it_and_keeps_its_task_and_report() {
     assert_eq!(outbox[0].state(), "approved");
     assert!(a::pending(&db, "triage").unwrap().is_empty());
     // Read back, then deleted: nothing accumulates in the state directory.
-    assert!(!std::fs::read_dir(util::state_dir()).unwrap().any(|e| {
+    assert!(!std::fs::read_dir(dirs().state).unwrap().any(|e| {
         e.unwrap()
             .file_name()
             .to_string_lossy()
@@ -398,7 +419,7 @@ fn a_wakeup_records_why_it_failed() {
     let db = h.db();
     let found = h.registered(&db);
     let why = "agent exceeded --timeout 120s";
-    let code = a::wake(&db, &found, None, &|argv: &[String]| {
+    let code = a::wake(&db, &dirs(), &found, None, &|argv: &[String]| {
         std::fs::write(
             after(argv, "--stats-file"),
             format!("{{\"exit\": 124, \"stats\": \"\", \"error\": \"{why}\"}}"),
@@ -427,7 +448,7 @@ fn a_wakeup_with_nothing_to_do_says_how_to_give_it_something() {
     .unwrap();
     let db = h.db();
     let found = h.registered(&db);
-    let refused = a::wake(&db, &found, None, &|_: &[String]| 0).unwrap_err();
+    let refused = a::wake(&db, &dirs(), &found, None, &|_: &[String]| 0).unwrap_err();
     assert!(refused.message.contains("sanduk tell"));
 }
 
@@ -456,7 +477,7 @@ fn a_gate_decides_before_any_model_is_paid() {
     assert_eq!(ran.calls().len(), 1);
     let found = gate(&h, "#!/bin/sh\nexit 0\n", 0o644);
     assert!(
-        a::wake(&db, &found, None, &|_: &[String]| 0)
+        a::wake(&db, &dirs(), &found, None, &|_: &[String]| 0)
             .unwrap_err()
             .message
             .contains("not executable")
@@ -472,7 +493,7 @@ fn the_outbox_does_not_read_through_a_report_symlink() {
     let found = h.registered(&db);
     let secret = h.root.join("host-only.txt");
     std::fs::write(&secret, "a key, say").unwrap();
-    a::wake(&db, &found, None, &|argv: &[String]| {
+    a::wake(&db, &dirs(), &found, None, &|argv: &[String]| {
         std::os::unix::fs::symlink(&secret, after(argv, "-o")).unwrap();
         0
     })
@@ -492,18 +513,18 @@ fn only_a_signal_to_this_process_is_not_a_failure() {
     let db = h.db();
     let found = h.registered(&db);
     for code in [130, 143, 129] {
-        a::wake(&db, &found, None, &|_: &[String]| code).unwrap();
+        a::wake(&db, &dirs(), &found, None, &|_: &[String]| code).unwrap();
         let row = a::row(&db, "triage").unwrap();
         assert_eq!((row.failures, row.disabled), (0, false), "{code}");
     }
     a::tell(&db, "triage", "look at PR 12").unwrap();
-    a::wake(&db, &found, None, &|_: &[String]| 130).unwrap();
+    a::wake(&db, &dirs(), &found, None, &|_: &[String]| 130).unwrap();
     assert_eq!(
         a::pending(&db, "triage").unwrap().len(),
         1,
         "an interrupted wakeup did not answer it"
     );
-    a::wake(&db, &found, None, &|_: &[String]| 137).unwrap();
+    a::wake(&db, &dirs(), &found, None, &|_: &[String]| 137).unwrap();
     assert_eq!(a::row(&db, "triage").unwrap().failures, 1);
 }
 
@@ -516,8 +537,8 @@ fn tick_wakes_what_is_due_once() {
     h.registered(&db);
     let ran = Ran::new(0);
     let run = |argv: &[String]| ran.run(argv);
-    assert_eq!(a::tick(&db, None, None, &run).unwrap(), 0);
-    assert_eq!(a::tick(&db, None, None, &run).unwrap(), 0);
+    assert_eq!(a::tick(&db, &dirs(), None, None, &run).unwrap(), 0);
+    assert_eq!(a::tick(&db, &dirs(), None, None, &run).unwrap(), 0);
     assert_eq!(ran.calls().len(), 1, "the interval has not passed");
 }
 
@@ -533,7 +554,7 @@ fn tick_leaves_an_assistant_another_process_is_running() {
     .unwrap();
     let ran = Ran::new(0);
     assert_eq!(
-        a::tick(&db, None, None, &|argv: &[String]| ran.run(argv)).unwrap(),
+        a::tick(&db, &dirs(), None, None, &|argv: &[String]| ran.run(argv)).unwrap(),
         0
     );
     assert!(ran.calls().is_empty());
@@ -549,7 +570,7 @@ fn tick_releases_the_claim_when_a_wakeup_fails() {
     .unwrap();
     let db = h.db();
     h.registered(&db);
-    assert!(a::tick(&db, None, None, &|_: &[String]| 0).is_err());
+    assert!(a::tick(&db, &dirs(), None, None, &|_: &[String]| 0).is_err());
     assert_eq!(a::row(&db, "triage").unwrap().claimed_by, None);
 }
 
@@ -561,7 +582,7 @@ fn an_interrupted_wakeup_skips_the_rest_of_the_pass() {
     h.registered(&db);
     a::register(&db, &a::load(&h.sibling("second")).unwrap()).unwrap();
     let woken = RefCell::new(0);
-    let code = a::tick(&db, None, None, &|_: &[String]| {
+    let code = a::tick(&db, &dirs(), None, None, &|_: &[String]| {
         *woken.borrow_mut() += 1;
         143
     })
@@ -580,7 +601,7 @@ fn an_assistant_that_will_not_load_leaves_the_rest_of_the_pass() {
     std::fs::remove_file(gone.join("assistant.toml")).unwrap();
     let ran = Ran::new(0);
     assert_eq!(
-        a::tick(&db, None, None, &|argv: &[String]| ran.run(argv)).unwrap(),
+        a::tick(&db, &dirs(), None, None, &|argv: &[String]| ran.run(argv)).unwrap(),
         2
     );
     assert_eq!(ran.calls().len(), 1);
@@ -594,7 +615,7 @@ fn each_wakeup_has_its_own_stats_file() {
     h.registered(&db);
     a::register(&db, &a::load(&h.sibling("review")).unwrap()).unwrap();
     let ran = Ran::new(0);
-    a::tick(&db, None, None, &|argv: &[String]| ran.run(argv)).unwrap();
+    a::tick(&db, &dirs(), None, None, &|argv: &[String]| ran.run(argv)).unwrap();
     let files: Vec<String> = ran
         .calls()
         .iter()
@@ -679,8 +700,11 @@ fn the_summary_is_the_row_and_its_queue_depths_as_sorted_json() {
 #[test]
 fn the_database_lives_under_the_state_directory() {
     let h = Home::new("dbpath");
-    assert_eq!(a::db_path(), h.root.join("state").join("assistants.db"));
-    assert_eq!(a::db_path().parent().unwrap(), util::state_dir());
+    assert_eq!(
+        a::db_path(&dirs()),
+        h.root.join("state").join("assistants.db")
+    );
+    assert_eq!(a::db_path(&dirs()).parent().unwrap(), dirs().state);
 }
 
 /// Written by Python sanduk before the columns existed: the history survives, and rows from
@@ -750,7 +774,7 @@ fn serve_ticks_until_a_signal_says_stop() {
         h
     };
     let passes = RefCell::new(0);
-    let code = a::serve(&db, 60, None, &|_: &[String]| {
+    let code = a::serve(&db, &dirs(), 60, None, &|_: &[String]| {
         *passes.borrow_mut() += 1;
         // SAFETY: signalling this process, whose handler only sets a flag.
         unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
@@ -776,7 +800,7 @@ fn serve_stops_when_a_wakeup_was_torn_down() {
     let db = h.db();
     h.registered(&db);
     let passes = RefCell::new(0);
-    a::serve(&db, 60, None, &|_: &[String]| {
+    a::serve(&db, &dirs(), 60, None, &|_: &[String]| {
         *passes.borrow_mut() += 1;
         143
     })
@@ -806,7 +830,7 @@ fn a_failed_pass_does_not_stop_serve() {
             // SAFETY: signalling this process, whose handler only sets a flag.
             unsafe { libc::kill(libc::getpid(), libc::SIGTERM) };
         });
-        a::serve(&db, 1, None, &|_: &[String]| {
+        a::serve(&db, &dirs(), 1, None, &|_: &[String]| {
             *passes.borrow_mut() += 1;
             0
         })

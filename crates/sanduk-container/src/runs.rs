@@ -18,14 +18,7 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 
 use serde_json::{Value, json};
 
-use sanduk_container::{CONTAINER_PREFIX, Engine};
-
-use crate::error::Result;
-use crate::util::{note, state_dir};
-
-pub fn runs_dir() -> PathBuf {
-    state_dir().join("runs")
-}
+use crate::{CONTAINER_PREFIX, Engine, Kind, Result};
 
 /// Whether the process that claimed a record is still there. A pid owned by another user answers
 /// EPERM, which is still a live process and still not ours to reap.
@@ -52,7 +45,15 @@ pub struct Run {
 }
 
 impl Run {
+    /// The record's names, one per line, beside it: what the [`Reaper`]'s shell reads.
+    pub fn names_path(&self) -> PathBuf {
+        names_of(&self.path)
+    }
+
     fn write(&self) -> Result<()> {
+        let mut names = self.containers.join("\n");
+        names.push('\n');
+        std::fs::write(self.names_path(), names)?;
         let record = json!({"pid": std::process::id(), "runtime": self.runtime, "containers": self.containers});
         std::fs::write(&self.path, record.to_string())?;
         Ok(())
@@ -66,15 +67,14 @@ impl Run {
 
     /// Gives up the claim: the containers are gone, or deliberately kept.
     pub fn release(&self) {
-        let _ = std::fs::remove_file(&self.path);
+        remove(&self.path);
     }
 }
 
 /// Records that this process owns `name` on `runtime`. A state directory that cannot be written
 /// stops the run: a run with no record leaks its container silently when it is killed.
-pub fn claim(runtime: &str, name: &str) -> Result<Run> {
-    let dir = runs_dir();
-    std::fs::create_dir_all(&dir)?;
+pub fn claim(dir: &Path, runtime: &str, name: &str) -> Result<Run> {
+    std::fs::create_dir_all(dir)?;
     let run = Run {
         path: dir.join(format!("{name}.json")),
         runtime: runtime.to_string(),
@@ -85,8 +85,8 @@ pub fn claim(runtime: &str, name: &str) -> Result<Run> {
 }
 
 /// Every readable record. An unreadable one is dropped: it names nothing anyone can act on.
-fn records() -> Vec<(PathBuf, Value)> {
-    let Ok(entries) = std::fs::read_dir(runs_dir()) else {
+fn records(dir: &Path) -> Vec<(PathBuf, Value)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut paths: Vec<PathBuf> = entries
@@ -104,7 +104,7 @@ fn records() -> Vec<(PathBuf, Value)> {
             {
                 Some(record) if record.is_object() => Some((path, record)),
                 _ => {
-                    let _ = std::fs::remove_file(&path);
+                    remove(&path);
                     None
                 }
             }
@@ -131,17 +131,17 @@ fn containers_of(record: &Value) -> Vec<String> {
 
 /// Containers a running process still claims. `stop` and `clean` act on a name prefix, which
 /// cannot tell a wakeup in flight from a leftover; the records can.
-pub fn live_containers() -> BTreeSet<String> {
-    records()
+pub fn live_containers(dir: &Path) -> BTreeSet<String> {
+    records(dir)
         .into_iter()
         .filter(|(_, r)| owner_alive(pid_of(r)))
         .flat_map(|(_, r)| containers_of(&r))
         .collect()
 }
 
-/// Deletes the containers of every run whose owner is gone, and returns them.
-pub fn sweep() -> Vec<String> {
-    sweep_with(|name| Ok(Engine::get(Some(name))?))
+/// Deletes the containers of every run in `dir` whose owner is gone, and returns them.
+pub fn sweep(dir: &Path, note: &dyn Fn(&str)) -> Vec<String> {
+    sweep_with(dir, |name| Engine::get(Some(name)), note)
 }
 
 /// [`sweep`], with the engine for a record's runtime from `engine`.
@@ -149,10 +149,14 @@ pub fn sweep() -> Vec<String> {
 /// A record naming an engine this host cannot reach is kept rather than dropped: the containers
 /// it names are still there, and the engine may be back on the next run. So is one whose delete
 /// failed: `inspect` on a container left behind shows its environment.
-pub fn sweep_with(engine: impl Fn(&str) -> Result<Engine>) -> Vec<String> {
+pub fn sweep_with(
+    dir: &Path,
+    engine: impl Fn(&str) -> Result<Engine>,
+    note: &dyn Fn(&str),
+) -> Vec<String> {
     let mut reaped = Vec::new();
     let mut engines: BTreeMap<String, Option<(Engine, BTreeSet<String>)>> = BTreeMap::new();
-    for (path, record) in records() {
+    for (path, record) in records(dir) {
         if owner_alive(pid_of(&record)) {
             continue;
         }
@@ -169,33 +173,8 @@ pub fn sweep_with(engine: impl Fn(&str) -> Result<Engine>) -> Vec<String> {
         let Some((engine, listed)) = found else {
             continue;
         };
-        delete(&path, &record, engine, listed, &mut reaped);
+        delete(&path, &record, engine, listed, &mut reaped, note);
     }
-    reaped
-}
-
-/// Deletes what the record at `path` still names, whether or not its owner is alive, and returns
-/// what it deleted. For a [`Reaper`], which knows its run is over: a killed owner can linger as a
-/// zombie that [`owner_alive`] still reports, and [`sweep`] would skip it.
-pub fn reap(path: &Path) -> Vec<String> {
-    reap_with(path, |name| Ok(Engine::get(Some(name))?))
-}
-
-/// [`reap`], with the engine for the record's runtime from `engine`.
-pub fn reap_with(path: &Path, engine: impl Fn(&str) -> Result<Engine>) -> Vec<String> {
-    let mut reaped = Vec::new();
-    let Some((path, record)) = records().into_iter().find(|(p, _)| p == path) else {
-        return reaped;
-    };
-    let runtime = record.get("runtime").and_then(Value::as_str).unwrap_or("");
-    let Ok(engine) = engine(runtime) else {
-        return reaped;
-    };
-    let Ok(listed) = engine.list_containers(CONTAINER_PREFIX) else {
-        return reaped;
-    };
-    let listed = listed.into_iter().map(|c| c.name).collect();
-    delete(&path, &record, &engine, &listed, &mut reaped);
     reaped
 }
 
@@ -207,6 +186,7 @@ fn delete(
     engine: &Engine,
     listed: &BTreeSet<String>,
     reaped: &mut Vec<String>,
+    note: &dyn Fn(&str),
 ) {
     let mut kept = false;
     for container in containers_of(record) {
@@ -229,12 +209,29 @@ fn delete(
     }
 }
 
-/// A process that runs [`reap`] on one record when the run holding it ends, however it ends.
+/// The shell a [`Reaper`] runs: wait for end of file, then delete each name the record still
+/// lists. A container the engine no longer has is not a failure; one it still has after the
+/// delete keeps the record, for the next sweep. `$1` record, `$2` names, `$3` CLI, `$4` delete verb.
+const REAP: &str = r#"cat >/dev/null
+[ -f "$1" ] || exit 0
+kept=0
+while IFS= read -r name; do
+  [ -n "$name" ] || continue
+  "$3" stop "$name" >/dev/null 2>&1
+  "$3" "$4" "$name" >/dev/null 2>&1 || ! "$3" inspect "$name" >/dev/null 2>&1 || kept=1
+done < "$2"
+[ "$kept" = 1 ] || rm -f "$1" "$2""#;
+
+/// A process that deletes one record's containers when the run holding it ends, however it ends.
 ///
 /// It reads a pipe this process holds the other end of. Dropping the reaper closes the pipe, and
 /// so does this process dying, SIGKILL included, which runs no teardown. It leads its own process
 /// group, so a caller that kills this one's group, as pma does at its deadline, does not reach it.
 /// A run that tore down cleanly released its record first, and the reaper finds nothing to do.
+///
+/// It knows its run is over, so it does not ask the pid: a killed owner not yet waited for is a
+/// zombie, and a zombie answers as alive. It is `sh` and the engine's CLI, not this executable,
+/// which in a library is the caller's and has no command for it.
 ///
 /// Tied to the run rather than the process: `serve` runs many in one process.
 pub struct Reaper {
@@ -243,17 +240,32 @@ pub struct Reaper {
 }
 
 impl Reaper {
-    /// Starts `sanduk reap <record>` from this executable. `None` when it cannot start; the next
+    /// Starts the reaper for `run`, with its runtime's CLI. `None` when it cannot start; the next
     /// run's sweep is still there.
-    pub fn start(record: &Path) -> Option<Reaper> {
+    pub fn start(run: &Run, note: &dyn Fn(&str)) -> Option<Reaper> {
+        let kind = Kind::from_name(&run.runtime)
+            .map_err(|e| note(&format!("no reaper for this run: {e}")))
+            .ok()?;
+        Self::start_as(run, kind.cli(), kind.delete_verb(), note)
+    }
+
+    /// [`start`](Self::start), with `cli` standing in for the engine's CLI.
+    pub fn start_as(
+        run: &Run,
+        cli: &str,
+        delete_verb: &str,
+        note: &dyn Fn(&str),
+    ) -> Option<Reaper> {
         use std::os::unix::process::CommandExt;
 
-        let exe = std::env::current_exe().ok()?;
-        let mut child = Command::new(exe)
-            .arg("reap")
-            .arg(record)
+        let mut child = Command::new("sh")
+            .args(["-c", REAP, "sanduk-reap"])
+            .arg(&run.path)
+            .arg(run.names_path())
+            .args([cli, delete_verb])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .process_group(0)
             .spawn()
             .map_err(|e| note(&format!("no reaper for this run: {e}")))
@@ -270,6 +282,12 @@ impl Drop for Reaper {
     }
 }
 
+fn names_of(record: &Path) -> PathBuf {
+    record.with_extension("names")
+}
+
+/// The record and its names.
 fn remove(path: &Path) {
     let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(names_of(path));
 }

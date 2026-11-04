@@ -23,10 +23,6 @@ repository.workspace = true
 homepage.workspace = true
 build = "build.rs"
 
-[[bin]]
-name = "sanduk"
-path = "src/main.rs"
-
 [dependencies]
 # The relay. hyper for both ends: one HTTP/1.1 connection per upstream call, as the Python relay
 # made, and a server whose response body is a channel the forwarding task fills.
@@ -38,21 +34,24 @@ bytes = "1"
 # ring rather than rustls's default aws-lc-rs, which needs cmake to build.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
 rustls-native-certs = "0.8"
-# preserve_order: a body the policy rewrites keeps its key order.
-serde_json = { version = "1", features = ["preserve_order"] }
+# raw_value, not preserve_order: Cargo unifies features, so preserve_order would change the key
+# order of every serde_json::Map in a crate that links this one. raw_value is additive.
+serde_json = { version = "1", features = ["raw_value"] }
+# The top level of a body the policy rewrites, in its own order, values kept byte for byte.
+indexmap = { version = "2", features = ["serde"] }
 # Upstream answers in gzip when offered it, and the usage block is inside.
 flate2 = "1"
 # Agent specs are TOML; recipes and kits stay JSON, which their pins hash byte for byte.
 serde = { version = "1", features = ["derive"] }
-toml = { version = "0.9", features = ["preserve_order"] }
+toml = "0.9"
 # Kit pins and image tags.
 sha2 = "0.10"
-clap = { version = "4", features = ["derive", "wrap_help"] }
 # Recipe validation: every value that reaches a shell is matched against a character set.
 regex = "1"
 sanduk-container = { path = "crates/sanduk-container", version = "0.1.0" }
-# Assistant state. Bundled: the schema is Python sanduk's, and a system SQLite is not a given.
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+[dev-dependencies]
+sanduk-container = { path = "crates/sanduk-container", features = ["test-util"] }
 
 [target.'cfg(unix)'.dependencies]
 # O_NOFOLLOW for request-body log files.

@@ -1,0 +1,28 @@
+[package]
+name = "sanduk-cli"
+description = "sanduk's command line: run a coding agent in a disposable container, with the API key held on the host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords = ["agent", "container", "sandbox", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "sanduk"
+path = "src/main.rs"
+
+[dependencies]
+sanduk = { path = "../..", version = "0.1.0" }
+sanduk-container = { path = "../sanduk-container", version = "0.1.0" }
+clap = { version = "4", features = ["derive", "wrap_help"] }
+# Assistant state. Bundled: the schema is Python sanduk's, and a system SQLite is not a given.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde_json = "1"
+# assistant.toml.
+toml = "0.9"
+regex = "1"
+libc = "0.2"

@@ -14,6 +14,9 @@
 
 mod daemon;
 mod exec;
+pub mod runs;
+#[cfg(feature = "test-util")]
+pub mod testing;
 
 use std::fmt;
 use std::net::TcpListener;
@@ -47,6 +50,12 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Error(e.to_string())
+    }
+}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -553,6 +562,50 @@ impl Engine {
         Ok(())
     }
 
+    /// [`Engine::build_image`], with each line of the build's output, stdout and stderr both,
+    /// passed to `line` as it comes rather than written to the terminal.
+    pub fn build_image_lines(
+        &self,
+        image: &str,
+        containerfile: &Path,
+        line: &mut dyn FnMut(&str),
+    ) -> Result<()> {
+        use std::io::BufRead;
+
+        let cf = match std::fs::canonicalize(containerfile) {
+            Ok(cf) if cf.is_file() => cf,
+            _ => return fail(format!("no Containerfile at {}", containerfile.display())),
+        };
+        let argv = build_argv(self.cli(), &self.build_args(), image, &cf);
+        let (reader, writer) = std::io::pipe()?;
+        let mut child = {
+            // Dropped once spawned: it holds the pipe's write end, and the read below ends only
+            // when every write end is closed.
+            let mut command = self.exec.command(&argv);
+            command
+                .stdin(std::process::Stdio::null())
+                .stdout(writer.try_clone()?)
+                .stderr(writer);
+            command
+                .spawn()
+                .map_err(|e| Error(format!("{}: {e}", self.cli())))?
+        };
+        for read in std::io::BufReader::new(reader).split(b'\n') {
+            let Ok(read) = read else { break };
+            let text = String::from_utf8_lossy(&read);
+            line(text.strip_suffix('\r').unwrap_or(&text));
+        }
+        let status = child.wait()?;
+        if !status.success() {
+            let r = Captured {
+                code: status.code(),
+                ..Captured::default()
+            };
+            return fail(format!("build failed ({})", exit(&r)));
+        }
+        Ok(())
+    }
+
     // --- networks ----------------------------------------------------------------------------
 
     /// The network's addresses, or `None` if it does not exist or reports none.
@@ -829,6 +882,11 @@ impl Engine {
         argv.push(spec.image.clone());
         argv.extend(spec.command.iter().cloned());
         argv
+    }
+
+    /// The process for `argv`, from [`Engine::run_argv`], for a caller that runs it itself.
+    pub fn command(&self, argv: &[String]) -> std::process::Command {
+        self.exec.command(argv)
     }
 
     /// Stops a container, leaving it on disk. Already stopped is not an error.

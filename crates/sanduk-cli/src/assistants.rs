@@ -18,12 +18,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
-use crate::agent::DEFAULT_AGENT;
-use crate::catalog::is_path;
-use crate::error::{Error, Result};
-use crate::providers::DEFAULT_PROVIDER;
-use crate::runs::owner_alive;
-use crate::util::{note, read_unfollowed, seconds, state_dir};
+use crate::note;
+use sanduk::agent::DEFAULT_AGENT;
+use sanduk::catalog::is_path;
+use sanduk::error::{Error, Result};
+use sanduk::providers::DEFAULT_PROVIDER;
+use sanduk::util::{Dirs, read_unfollowed, seconds};
+use sanduk_container::runs::owner_alive;
 
 pub const CONFIG_NAME: &str = "assistant.toml";
 const DEFAULT_EVERY: &str = "30m";
@@ -81,9 +82,14 @@ CREATE TABLE IF NOT EXISTS outbox (
 );
 ";
 
-impl From<rusqlite::Error> for Error {
-    fn from(e: rusqlite::Error) -> Self {
-        Error::new(format!("database: {e}"))
+/// A database failure as sanduk's error. A trait, not `From`: both types are other crates'.
+trait Db<T> {
+    fn db(self) -> Result<T>;
+}
+
+impl<T> Db<T> for rusqlite::Result<T> {
+    fn db(self) -> Result<T> {
+        self.map_err(|e| Error::new(format!("database: {e}")))
     }
 }
 
@@ -292,28 +298,30 @@ fn anchor(directory: &Path, spec: &str) -> String {
 
 // --- state ------------------------------------------------------------------------------------------
 
-pub fn db_path() -> PathBuf {
-    state_dir().join("assistants.db")
+pub fn db_path(dirs: &Dirs) -> PathBuf {
+    dirs.state.join("assistants.db")
 }
 
-pub fn connect() -> Result<Connection> {
-    let path = db_path();
+pub fn connect(dirs: &Dirs) -> Result<Connection> {
+    let path = db_path(dirs);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let db = Connection::open(&path)?;
-    db.busy_timeout(Duration::from_secs(5))?;
-    db.pragma_update(None, "journal_mode", "WAL")?;
-    db.execute_batch(SCHEMA)?;
+    let db = Connection::open(&path).db()?;
+    db.busy_timeout(Duration::from_secs(5)).db()?;
+    db.pragma_update(None, "journal_mode", "WAL").db()?;
+    db.execute_batch(SCHEMA).db()?;
     migrate(&db)?;
     Ok(db)
 }
 
 fn columns(db: &Connection, table: &str) -> Result<Vec<String>> {
-    let mut stmt = db.prepare(&format!("PRAGMA table_info({table})"))?;
+    let mut stmt = db.prepare(&format!("PRAGMA table_info({table})")).db()?;
     let names = stmt
-        .query_map([], |r| r.get::<_, String>(1))?
-        .collect::<rusqlite::Result<_>>()?;
+        .query_map([], |r| r.get::<_, String>(1))
+        .db()?
+        .collect::<rusqlite::Result<_>>()
+        .db()?;
     Ok(names)
 }
 
@@ -323,7 +331,8 @@ fn migrate(db: &Connection) -> Result<()> {
     let have = columns(db, "runs")?;
     for column in ["stats", "error"] {
         if !have.iter().any(|c| c == column) {
-            db.execute(&format!("ALTER TABLE runs ADD COLUMN {column} TEXT"), [])?;
+            db.execute(&format!("ALTER TABLE runs ADD COLUMN {column} TEXT"), [])
+                .db()?;
         }
     }
     let held = columns(db, "outbox")?;
@@ -332,11 +341,13 @@ fn migrate(db: &Connection) -> Result<()> {
             db.execute(
                 &format!("ALTER TABLE outbox ADD COLUMN {column} INTEGER"),
                 [],
-            )?;
+            )
+            .db()?;
             // Rows written before approvals existed were delivered on sight, which is what an
             // assistant without `approval` still does.
             if column == "approved_at" {
-                db.execute("UPDATE outbox SET approved_at = created_at", [])?;
+                db.execute("UPDATE outbox SET approved_at = created_at", [])
+                    .db()?;
             }
         }
     }
@@ -397,15 +408,18 @@ pub fn register(db: &Connection, assistant: &Assistant) -> Result<()> {
         "INSERT INTO assistants (name, dir, next_due_at) VALUES (?1, ?2, ?3) \
          ON CONFLICT(name) DO UPDATE SET dir = excluded.dir",
         params![assistant.name, assistant.dir.display().to_string(), now()],
-    )?;
+    )
+    .db()?;
     Ok(())
 }
 
 pub fn rows(db: &Connection) -> Result<Vec<Row>> {
-    let mut stmt = db.prepare("SELECT * FROM assistants ORDER BY name")?;
+    let mut stmt = db.prepare("SELECT * FROM assistants ORDER BY name").db()?;
     let found = stmt
-        .query_map([], Row::from)?
-        .collect::<rusqlite::Result<_>>()?;
+        .query_map([], Row::from)
+        .db()?
+        .collect::<rusqlite::Result<_>>()
+        .db()?;
     Ok(found)
 }
 
@@ -415,7 +429,8 @@ pub fn row(db: &Connection, name: &str) -> Result<Row> {
         [name],
         Row::from,
     )
-    .optional()?
+    .optional()
+    .db()?
     .ok_or_else(|| {
         Error::new(format!(
             "no assistant named {name:?}. `sanduk assistant list`"
@@ -428,7 +443,8 @@ pub fn set_disabled(db: &Connection, name: &str, disabled: bool) -> Result<()> {
     db.execute(
         "UPDATE assistants SET disabled = ?1, failures = 0 WHERE name = ?2",
         params![i64::from(disabled), name],
-    )?;
+    )
+    .db()?;
     Ok(())
 }
 
@@ -443,17 +459,19 @@ pub fn due(db: &Connection, name: Option<&str>) -> Result<Vec<Row>> {
     }
     let mut stmt = db.prepare(
         "SELECT * FROM assistants WHERE disabled = 0 AND next_due_at <= ?1 ORDER BY next_due_at",
-    )?;
+    ).db()?;
     let found = stmt
-        .query_map([now()], Row::from)?
-        .collect::<rusqlite::Result<_>>()?;
+        .query_map([now()], Row::from)
+        .db()?
+        .collect::<rusqlite::Result<_>>()
+        .db()?;
     Ok(found)
 }
 
 /// Claims an assistant for this process; `false` means someone else has it. A claim whose pid is
 /// gone is stale and may be taken; a live one is left alone.
 pub fn take(db: &Connection, name: &str) -> Result<bool> {
-    db.execute_batch("BEGIN IMMEDIATE")?;
+    db.execute_batch("BEGIN IMMEDIATE").db()?;
     let claimed = (|| -> Result<bool> {
         let me = i64::from(std::process::id());
         if let Some(held) = row(db, name)?.claimed_by
@@ -465,12 +483,13 @@ pub fn take(db: &Connection, name: &str) -> Result<bool> {
         db.execute(
             "UPDATE assistants SET claimed_by = ?1, claimed_at = ?2 WHERE name = ?3",
             params![me, now(), name],
-        )?;
+        )
+        .db()?;
         Ok(true)
     })();
     match claimed {
-        Ok(true) => db.execute_batch("COMMIT")?,
-        _ => db.execute_batch("ROLLBACK")?,
+        Ok(true) => db.execute_batch("COMMIT").db()?,
+        _ => db.execute_batch("ROLLBACK").db()?,
     }
     claimed
 }
@@ -479,7 +498,8 @@ pub fn release(db: &Connection, name: &str) -> Result<()> {
     db.execute(
         "UPDATE assistants SET claimed_by = NULL, claimed_at = NULL WHERE name = ?1",
         [name],
-    )?;
+    )
+    .db()?;
     Ok(())
 }
 
@@ -488,7 +508,8 @@ pub fn tell(db: &Connection, name: &str, body: &str) -> Result<i64> {
     db.execute(
         "INSERT INTO inbox (name, created_at, body) VALUES (?1, ?2, ?3)",
         params![name, now(), body],
-    )?;
+    )
+    .db()?;
     Ok(db.last_insert_rowid())
 }
 
@@ -501,7 +522,7 @@ pub struct Message {
 }
 
 pub fn pending(db: &Connection, name: &str) -> Result<Vec<Message>> {
-    let mut stmt = db.prepare("SELECT id, created_at, body FROM inbox WHERE name = ?1 AND consumed_at IS NULL ORDER BY id")?;
+    let mut stmt = db.prepare("SELECT id, created_at, body FROM inbox WHERE name = ?1 AND consumed_at IS NULL ORDER BY id").db()?;
     let found = stmt
         .query_map([name], |r| {
             Ok(Message {
@@ -509,8 +530,10 @@ pub fn pending(db: &Connection, name: &str) -> Result<Vec<Message>> {
                 created_at: r.get(1)?,
                 body: r.get(2)?,
             })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
+        })
+        .db()?
+        .collect::<rusqlite::Result<_>>()
+        .db()?;
     Ok(found)
 }
 
@@ -519,7 +542,8 @@ pub fn consume(db: &Connection, ids: &[i64]) -> Result<()> {
         db.execute(
             "UPDATE inbox SET consumed_at = ?1 WHERE id = ?2",
             params![now(), id],
-        )?;
+        )
+        .db()?;
     }
     Ok(())
 }
@@ -569,7 +593,7 @@ pub fn outbox(
         sql += " AND approved_at IS NULL AND rejected_at IS NULL";
     }
     sql += " ORDER BY id";
-    let mut stmt = db.prepare(&sql)?;
+    let mut stmt = db.prepare(&sql).db()?;
     let map = |r: &rusqlite::Row| {
         Ok(Entry {
             id: r.get("id")?,
@@ -584,9 +608,15 @@ pub fn outbox(
     };
     let found = match name {
         Some(name) => stmt
-            .query_map([name], map)?
-            .collect::<rusqlite::Result<_>>()?,
-        None => stmt.query_map([], map)?.collect::<rusqlite::Result<_>>()?,
+            .query_map([name], map)
+            .db()?
+            .collect::<rusqlite::Result<_>>()
+            .db()?,
+        None => stmt
+            .query_map([], map)
+            .db()?
+            .collect::<rusqlite::Result<_>>()
+            .db()?,
     };
     Ok(found)
 }
@@ -604,7 +634,7 @@ pub fn decide(db: &Connection, ids: &[i64], approve: bool) -> Result<usize> {
     );
     let mut changed = 0;
     for id in ids {
-        changed += db.execute(&sql, params![now(), id])?;
+        changed += db.execute(&sql, params![now(), id]).db()?;
     }
     Ok(changed)
 }
@@ -614,7 +644,8 @@ fn delivered(db: &Connection, ids: &[i64]) -> Result<()> {
         db.execute(
             "UPDATE outbox SET delivered_at = ?1 WHERE id = ?2",
             params![now(), id],
-        )?;
+        )
+        .db()?;
     }
     Ok(())
 }
@@ -637,7 +668,7 @@ pub fn history(db: &Connection, name: Option<&str>, limit: i64) -> Result<Vec<Wa
         Some(_) => "SELECT * FROM runs WHERE name = ?1 ORDER BY id DESC LIMIT ?2",
         None => "SELECT * FROM runs ORDER BY id DESC LIMIT ?1",
     };
-    let mut stmt = db.prepare(sql)?;
+    let mut stmt = db.prepare(sql).db()?;
     let map = |r: &rusqlite::Row| {
         Ok(Wakeup {
             id: r.get("id")?,
@@ -652,11 +683,15 @@ pub fn history(db: &Connection, name: Option<&str>, limit: i64) -> Result<Vec<Wa
     };
     let found = match name {
         Some(name) => stmt
-            .query_map(params![name, limit], map)?
-            .collect::<rusqlite::Result<_>>()?,
+            .query_map(params![name, limit], map)
+            .db()?
+            .collect::<rusqlite::Result<_>>()
+            .db()?,
         None => stmt
-            .query_map(params![limit], map)?
-            .collect::<rusqlite::Result<_>>()?,
+            .query_map(params![limit], map)
+            .db()?
+            .collect::<rusqlite::Result<_>>()
+            .db()?,
     };
     Ok(found)
 }
@@ -805,7 +840,7 @@ pub type Runner<'a> = &'a dyn Fn(&[String]) -> i32;
 pub fn run_in_process(argv: &[String]) -> i32 {
     let mut full = vec![std::ffi::OsString::from("sanduk")];
     full.extend(argv.iter().map(std::ffi::OsString::from));
-    crate::cli::main(full)
+    crate::main(full)
 }
 
 /// One wakeup: gate, compose, run, record, reschedule. Returns the run's exit code.
@@ -814,6 +849,7 @@ pub fn run_in_process(argv: &[String]) -> i32 {
 /// `max_failures`, disables it.
 pub fn wake(
     db: &Connection,
+    dirs: &Dirs,
     assistant: &Assistant,
     runtime: Option<&str>,
     run: Runner,
@@ -834,10 +870,11 @@ pub fn wake(
     db.execute(
         "INSERT INTO runs (name, started_at, report_path) VALUES (?1, ?2, ?3)",
         params![assistant.name, now(), report.display().to_string()],
-    )?;
+    )
+    .db()?;
     let run_id = db.last_insert_rowid();
     // Keyed on the run id, which the shared database makes unique across processes.
-    let stats_file = state_dir().join(format!("wakeup-{run_id}.json"));
+    let stats_file = dirs.state.join(format!("wakeup-{run_id}.json"));
     let _ = std::fs::remove_file(&stats_file);
     let code = run(&run_argv(
         assistant,
@@ -851,19 +888,25 @@ pub fn wake(
     db.execute(
         "UPDATE runs SET ended_at = ?1, exit_code = ?2, stats = ?3, error = ?4 WHERE id = ?5",
         params![now(), code, stats, error, run_id],
-    )?;
+    )
+    .db()?;
     let why = error
         .as_ref()
         .map_or_else(String::new, |e| format!(": {e}"));
     // Not followed if it is a symlink: `run` refuses to write the report through one, and reading
     // one here would put back the file that refusal withheld.
-    let body = read_unfollowed(&report).unwrap_or_else(|| format!("(no report, exit {code}{why})"));
+    let body = read_unfollowed(&report).unwrap_or_else(|refused| {
+        if let Some(why) = refused {
+            note(&why);
+        }
+        format!("(no report, exit {code}{why})")
+    });
     // Approval gates delivery, the only thing that leaves the box.
     let approved = (!assistant.approval).then(now);
     db.execute(
         "INSERT INTO outbox (name, run_id, created_at, body, approved_at) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![assistant.name, run_id, now(), body, approved],
-    )?;
+    ).db()?;
     if code == 0 {
         // Only a wakeup that finished consumes its messages: a failed one has not answered them.
         consume(db, &items.iter().map(|i| i.id).collect::<Vec<_>>())?;
@@ -919,13 +962,14 @@ pub fn schedule_next(db: &Connection, assistant: &Assistant, ok: bool) -> Result
     db.execute(
         "UPDATE assistants SET next_due_at = ?1, last_run_at = ?2, failures = ?3, disabled = ?4 WHERE name = ?5",
         params![now() + delay, now(), failures, i64::from(disabled), assistant.name],
-    )?;
+    ).db()?;
     Ok(())
 }
 
 /// Every assistant that is due, once, in order, one at a time. Returns the worst exit code.
 pub fn tick(
     db: &Connection,
+    dirs: &Dirs,
     name: Option<&str>,
     runtime: Option<&str>,
     run: Runner,
@@ -952,7 +996,7 @@ pub fn tick(
             continue;
         }
         note(&format!("{}: waking", assistant.name));
-        let woke = wake(db, &assistant, runtime, run);
+        let woke = wake(db, dirs, &assistant, runtime, run);
         release(db, &assistant.name)?;
         let code = woke?;
         worst = worst.max(code);
@@ -968,11 +1012,13 @@ pub fn tick(
 /// Seconds until the next wakeup is due, capped at `interval`, so an assistant registered while
 /// the loop sleeps waits `interval` at worst.
 pub fn nap(db: &Connection, interval: u64) -> Result<u64> {
-    let soonest: Option<i64> = db.query_row(
-        "SELECT MIN(next_due_at) FROM assistants WHERE disabled = 0",
-        [],
-        |r| r.get(0),
-    )?;
+    let soonest: Option<i64> = db
+        .query_row(
+            "SELECT MIN(next_due_at) FROM assistants WHERE disabled = 0",
+            [],
+            |r| r.get(0),
+        )
+        .db()?;
     Ok(match soonest {
         None => interval,
         Some(due) => (due - now()).clamp(1, interval.max(1) as i64) as u64,
@@ -987,7 +1033,13 @@ extern "C" fn halt(_signum: libc::c_int) {
 
 /// `tick` on a loop, in the foreground, until SIGINT or SIGTERM says stop. The loop holds no
 /// credential and no container between wakeups; it is a timer.
-pub fn serve(db: &Connection, interval: u64, runtime: Option<&str>, run: Runner) -> Result<i32> {
+pub fn serve(
+    db: &Connection,
+    dirs: &Dirs,
+    interval: u64,
+    runtime: Option<&str>,
+    run: Runner,
+) -> Result<i32> {
     STOPPING.store(false, Ordering::SeqCst);
     let handler = halt as extern "C" fn(libc::c_int) as libc::sighandler_t;
     // SAFETY: the handler only stores to an atomic.
@@ -1007,7 +1059,7 @@ pub fn serve(db: &Connection, interval: u64, runtime: Option<&str>, run: Runner)
     while !STOPPING.load(Ordering::SeqCst) {
         // A wakeup that a signal tore down took the signal with it: `run` holds its own handlers
         // while it holds a container, so this loop learns about it from the exit code.
-        match tick(db, None, runtime, run) {
+        match tick(db, dirs, None, runtime, run) {
             Ok(code) if interrupted(code) => break,
             Ok(_) => {}
             Err(e) => {

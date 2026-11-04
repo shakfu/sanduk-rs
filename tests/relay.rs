@@ -243,6 +243,23 @@ fn max_tokens_is_clamped_and_a_smaller_ask_is_untouched() {
     assert_eq!(up.last().json()["max_tokens"], 1024);
 }
 
+/// A clamped body keeps its members in the order they were sent, and every value the policy did
+/// not change byte for byte, whitespace and nested key order included.
+#[test]
+fn a_clamped_body_keeps_its_order_and_its_untouched_bytes() {
+    let up = ok();
+    let (relay, _) = relay(A, &up, |mut c| {
+        c.max_tokens_cap = Some(4000);
+        c
+    });
+    let sent = br#"{"z": 1, "model": "m", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 999999, "a": {"y": 2,  "b": 1.50}}"#;
+    call(relay.port(), A, "/v1/messages", TOKEN, Some(sent));
+    assert_eq!(
+        String::from_utf8(up.last().body).unwrap(),
+        r#"{"z":1,"model":"m","messages":[{"role": "user", "content": "hi"}],"max_tokens":4000,"a":{"y": 2,  "b": 1.50}}"#
+    );
+}
+
 #[test]
 fn malformed_json_is_rejected_when_policy_is_on() {
     let up = ok();

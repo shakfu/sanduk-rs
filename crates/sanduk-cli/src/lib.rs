@@ -1,6 +1,7 @@
-//! The command line: parse flags, wire the pieces, tear everything down.
+//! `sanduk`, the command line: parse flags, wire the library's pieces, print what they report.
 
-mod clone;
+pub mod assistants;
+mod launch;
 mod run;
 
 use std::ffi::OsString;
@@ -10,15 +11,15 @@ use clap::{Args, Parser, Subcommand};
 
 use sanduk_container::{CONTAINER_PREFIX, Container, Engine, Kind, default_kind};
 
-use crate::agent;
-use crate::assistants;
-use crate::catalog;
-use crate::error::{Error, Result};
-use crate::kits;
-use crate::providers::PROVIDERS;
-use crate::recipes;
-use crate::runs::live_containers;
-use crate::util::note;
+use sanduk::agent;
+use sanduk::catalog;
+use sanduk::error::{Error, Result};
+use sanduk::kits;
+use sanduk::observe::{Note, Observer};
+use sanduk::providers::PROVIDERS;
+use sanduk::recipes;
+use sanduk::util::Dirs;
+use sanduk_container::runs::live_containers;
 
 pub use run::{RunArgs, agent_stats};
 
@@ -70,9 +71,6 @@ enum Command {
     System(SystemArgs),
     /// Show registered agents, providers, runtimes, recipes, kits
     List(ListArgs),
-    /// Delete a run's containers once it has ended; started by `run` itself
-    #[command(hide = true)]
-    Reap(ReapArgs),
 }
 
 /// Flags every command that talks to a container engine takes.
@@ -84,6 +82,18 @@ pub struct EngineArgs {
     /// Suppress the per-event trace
     #[arg(short, long)]
     pub quiet: bool,
+}
+
+impl ImageArgs {
+    pub fn spec(&self) -> sanduk::run::ImageSpec {
+        sanduk::run::ImageSpec {
+            agent: self.agent.clone(),
+            recipe: self.recipe.clone(),
+            kits: self.kit.clone(),
+            image: self.image.clone(),
+            containerfile: self.containerfile.clone(),
+        }
+    }
 }
 
 impl EngineArgs {
@@ -133,12 +143,6 @@ struct ShellArgs {
     engine: EngineArgs,
     #[command(flatten)]
     image: ImageArgs,
-}
-
-#[derive(Args)]
-struct ReapArgs {
-    /// The run's ownership record
-    record: PathBuf,
 }
 
 #[derive(Args)]
@@ -252,6 +256,29 @@ struct ListArgs {
     axis: String,
 }
 
+/// One progress line on stderr, so stdout stays the agent's.
+pub fn note(msg: &str) {
+    eprintln!("sanduk: {msg}");
+}
+
+/// Notes to stderr, as `sanduk: ...` and `proxy: ...`; a caught signal cancels.
+pub struct Stderr;
+
+impl Observer for Stderr {
+    fn note(&self, note: Note) {
+        match note {
+            Note::Info(msg) => eprintln!("sanduk: {msg}"),
+            Note::Relay(msg) => eprintln!("proxy: {msg}"),
+            Note::Output(line) | Note::Build(line) => eprintln!("{line}"),
+            _ => {}
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        launch::Signals::caught().is_some()
+    }
+}
+
 /// Every command's one exit. A failure the caller can act on becomes a line and a status.
 pub fn main(argv: Vec<OsString>) -> i32 {
     // The verbs clap knows, so this list cannot drift from them.
@@ -268,7 +295,7 @@ pub fn main(argv: Vec<OsString>) -> i32 {
         // The first argument used to be the task, so this is the mistake to expect.
         eprintln!(
             "sanduk: {first:?} is not a command. Did you mean: sanduk run {}\ncommands: {}",
-            crate::util::shell_quote(first),
+            sanduk::util::shell_quote(first),
             verbs.join(", ")
         );
         return 2;
@@ -280,57 +307,77 @@ pub fn main(argv: Vec<OsString>) -> i32 {
             return e.exit_code();
         }
     };
+    let dirs = &Dirs::default();
+    let in_process = |argv: &[String]| assistants::run_in_process(argv);
     let result = match cli.command {
-        Command::Run(args) => run::run(*args),
-        Command::Assistant(args) => assistant(args),
-        Command::Tell(args) => tell(args),
-        Command::Tick(args) => assistants::connect().and_then(|db| {
+        Command::Run(args) => run::run(dirs, *args),
+        Command::Assistant(args) => assistant(dirs, args),
+        Command::Tell(args) => tell(dirs, args),
+        Command::Tick(args) => assistants::connect(dirs).and_then(|db| {
             assistants::tick(
                 &db,
+                dirs,
                 args.name.as_deref(),
                 args.runtime.as_deref(),
-                &assistants::run_in_process,
+                &in_process,
             )
         }),
-        Command::Serve(args) => assistants::connect().and_then(|db| {
+        Command::Serve(args) => assistants::connect(dirs).and_then(|db| {
             assistants::serve(
                 &db,
+                dirs,
                 args.interval,
                 args.runtime.as_deref(),
-                &assistants::run_in_process,
+                &in_process,
             )
         }),
-        Command::Outbox(args) => outbox(args),
-        Command::Approve(args) => decide(args, true),
-        Command::Reject(args) => decide(args, false),
-        Command::Runs(args) => runs(args),
-        Command::Build(args) => build(args),
-        Command::Shell(args) => shell(args),
+        Command::Outbox(args) => outbox(dirs, args),
+        Command::Approve(args) => decide(dirs, args, true),
+        Command::Reject(args) => decide(dirs, args, false),
+        Command::Runs(args) => runs(dirs, args),
+        Command::Build(args) => build(dirs, args),
+        Command::Shell(args) => shell(dirs, args),
         Command::Ps(args) => ps(args),
-        Command::Stop(args) => stop(args),
-        Command::Clean(args) => clean(&args.engine, args.all),
-        Command::Destroy(args) => destroy(args),
+        Command::Stop(args) => stop(dirs, args),
+        Command::Clean(args) => clean(dirs, &args.engine, args.all),
+        Command::Destroy(args) => destroy(dirs, args),
         Command::System(args) => system(args),
-        Command::List(args) => list(args),
-        Command::Reap(args) => {
-            // End of file: the run dropped its end, or died holding it.
-            let _ = std::io::copy(&mut std::io::stdin(), &mut std::io::sink());
-            crate::runs::reap(&args.record);
-            Ok(0)
-        }
+        Command::List(args) => list(dirs, args),
     };
     match result {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("sanduk: {}", e.message);
+            eprintln!("sanduk: {}", message(&e));
             e.code
         }
     }
 }
 
-fn build(args: BuildArgs) -> Result<i32> {
+/// The flag that sets a [`sanduk::run::Options`] field.
+fn flag(option: &str) -> String {
+    let field = option.strip_prefix("image.").unwrap_or(option);
+    match field {
+        "workdir" => "-w".into(),
+        "task" => "the task".into(),
+        "mounts" => "--mount".into(),
+        "kits" => "--kit".into(),
+        "clone_into" => "--clone".into(),
+        "at_host_path" => "--work-at-host-path".into(),
+        other => format!("--{}", other.replace('_', "-")),
+    }
+}
+
+/// An error as the CLI prints it: the option it is about named by its flag.
+pub fn message(e: &Error) -> String {
+    match e.option {
+        Some(option) => format!("{} {}", flag(option), e.message),
+        None => e.message.clone(),
+    }
+}
+
+fn build(dirs: &Dirs, args: BuildArgs) -> Result<i32> {
     let engine = args.engine.engine()?;
-    let (_, image) = run::resolve_image(&args.image, &engine)?;
+    let (_, image) = sanduk::run::resolve_image(dirs, &args.image.spec(), &engine, &Stderr)?;
     if args.dry_run {
         print_build(&image)?;
         return Ok(0);
@@ -343,12 +390,12 @@ fn build(args: BuildArgs) -> Result<i32> {
         ));
         return Ok(0);
     }
-    run::build_image(&engine, &image)?;
+    sanduk::run::build_image(&engine, &image, &Stderr)?;
     Ok(0)
 }
 
 /// What `build` would do: the resolved recipe, then the Containerfile.
-fn print_build(image: &run::Image) -> Result<()> {
+fn print_build(image: &sanduk::run::Image) -> Result<()> {
     println!("# image: {}", image.tag);
     match (&image.recipe, &image.rendered) {
         (Some(recipe), Some(rendered)) => {
@@ -375,15 +422,15 @@ fn print_build(image: &run::Image) -> Result<()> {
     Ok(())
 }
 
-fn shell(args: ShellArgs) -> Result<i32> {
+fn shell(dirs: &Dirs, args: ShellArgs) -> Result<i32> {
     let engine = args.engine.engine()?;
-    let (_, image) = run::resolve_image(&args.image, &engine)?;
+    let (_, image) = sanduk::run::resolve_image(dirs, &args.image.spec(), &engine, &Stderr)?;
     engine.require()?;
     if !engine.image_exists(&image.tag) {
         return Err(Error::new(format!(
             "{} is not built. Run: sanduk build {}",
             image.tag,
-            run::selectors(&args.image)
+            selectors(&args.image.spec())
         )));
     }
     // Handed straight to the terminal: this one inherits the tty.
@@ -408,8 +455,8 @@ fn ps(args: EngineArgs) -> Result<i32> {
 }
 
 /// Those no live run claims. A wakeup on a schedule is nobody's to stop.
-fn unowned(containers: Vec<Container>) -> Vec<Container> {
-    let held = live_containers();
+fn unowned(dirs: &Dirs, containers: Vec<Container>) -> Vec<Container> {
+    let held = live_containers(&dirs.runs());
     let (keep, rest): (Vec<Container>, Vec<Container>) =
         containers.into_iter().partition(|c| held.contains(&c.name));
     if !keep.is_empty() {
@@ -424,7 +471,7 @@ fn unowned(containers: Vec<Container>) -> Vec<Container> {
     rest
 }
 
-fn stop(args: EngineArgs) -> Result<i32> {
+fn stop(dirs: &Dirs, args: EngineArgs) -> Result<i32> {
     let engine = args.engine()?;
     engine.require()?;
     let running = engine
@@ -432,7 +479,7 @@ fn stop(args: EngineArgs) -> Result<i32> {
         .into_iter()
         .filter(|c| c.state == "running")
         .collect();
-    let stoppable = unowned(running);
+    let stoppable = unowned(dirs, running);
     for c in &stoppable {
         engine.stop(&c.name);
         note(&format!("stopped {}", c.name));
@@ -445,11 +492,11 @@ fn stop(args: EngineArgs) -> Result<i32> {
 
 /// Deletes every container sanduk named, except one a live run is using. `--all` overrides the
 /// exception for a run whose process is wedged rather than working.
-fn clean(args: &EngineArgs, all: bool) -> Result<i32> {
+fn clean(dirs: &Dirs, args: &EngineArgs, all: bool) -> Result<i32> {
     let engine = args.engine()?;
     engine.require()?;
     let found = engine.list_containers(CONTAINER_PREFIX)?;
-    let deletable = if all { found } else { unowned(found) };
+    let deletable = if all { found } else { unowned(dirs, found) };
     for c in &deletable {
         match engine.destroy(&c.name) {
             Ok(()) => note(&format!("deleted {}", c.name)),
@@ -465,10 +512,10 @@ fn clean(args: &EngineArgs, all: bool) -> Result<i32> {
 /// Everything sanduk made on this engine, except the request-body log: that is written outside
 /// the bind mount so the agent cannot edit its own audit trail, and a cleanup verb deleting it
 /// would undo the point.
-fn destroy(args: DestroyArgs) -> Result<i32> {
+fn destroy(dirs: &Dirs, args: DestroyArgs) -> Result<i32> {
     let engine = args.engine.engine()?;
-    let (_, image) = run::resolve_image(&args.image, &engine)?;
-    clean(&args.engine, false)?;
+    let (_, image) = sanduk::run::resolve_image(dirs, &args.image.spec(), &engine, &Stderr)?;
+    clean(dirs, &args.engine, false)?;
     match &image.recipe {
         Some(recipe) if args.image.image.is_none() => {
             // Every build of the recipe: each edit to it, or to a kit, is a new tag.
@@ -482,7 +529,7 @@ fn destroy(args: DestroyArgs) -> Result<i32> {
         }
         _ => deleted(engine.delete_image(&image.tag), "image", &image.tag),
     }
-    for network in run::mode_networks(args.proxy_network.as_deref()) {
+    for network in sanduk::run::mode_networks(args.proxy_network.as_deref()) {
         deleted(engine.delete_network(&network), "network", &network);
     }
     Ok(0)
@@ -513,11 +560,11 @@ fn system(args: SystemArgs) -> Result<i32> {
 }
 
 /// One row per registered thing, on stdout.
-fn list(args: ListArgs) -> Result<i32> {
+fn list(dirs: &Dirs, args: ListArgs) -> Result<i32> {
     match args.axis.as_str() {
         "agents" => {
-            for name in agent::names()? {
-                match agent::get(&name) {
+            for name in agent::names(dirs)? {
+                match agent::get(dirs, &name) {
                     Ok(a) => {
                         let built = a.recipe.clone().or(a.image.clone()).unwrap_or_default();
                         let mut protocols = a.protocols.clone();
@@ -529,8 +576,8 @@ fn list(args: ListArgs) -> Result<i32> {
             }
         }
         "recipes" => {
-            for name in catalog::names(catalog::Kind::Recipes)? {
-                match recipes::resolve(&name, &[]) {
+            for name in catalog::names(dirs, catalog::Kind::Recipes)? {
+                match recipes::resolve(dirs, &name, &[], &Stderr) {
                     Ok(recipe) => {
                         let used: Vec<&str> =
                             recipe.kits.iter().map(|u| u.kit.name.as_str()).collect();
@@ -546,8 +593,8 @@ fn list(args: ListArgs) -> Result<i32> {
             }
         }
         "kits" => {
-            for name in catalog::names(catalog::Kind::Kits)? {
-                match kits::load(&name, None) {
+            for name in catalog::names(dirs, catalog::Kind::Kits)? {
+                match kits::load(dirs, &name, None) {
                     Ok(kit) => {
                         let tools: Vec<&str> = kit.tools.iter().map(|t| t.name.as_str()).collect();
                         let tools = if tools.is_empty() {
@@ -621,8 +668,8 @@ fn list(args: ListArgs) -> Result<i32> {
     Ok(0)
 }
 
-fn assistant(args: AssistantArgs) -> Result<i32> {
-    let db = assistants::connect()?;
+fn assistant(dirs: &Dirs, args: AssistantArgs) -> Result<i32> {
+    let db = assistants::connect(dirs)?;
     match args.action {
         AssistantAction::Add { dir } => {
             let added = assistants::load(&dir)?;
@@ -663,8 +710,8 @@ fn assistant(args: AssistantArgs) -> Result<i32> {
     Ok(0)
 }
 
-fn tell(args: TellArgs) -> Result<i32> {
-    let db = assistants::connect()?;
+fn tell(dirs: &Dirs, args: TellArgs) -> Result<i32> {
+    let db = assistants::connect(dirs)?;
     assistants::tell(&db, &args.name, &args.message.join(" "))?;
     note(&format!(
         "queued for {}; it arrives on the next wakeup",
@@ -673,8 +720,8 @@ fn tell(args: TellArgs) -> Result<i32> {
     Ok(0)
 }
 
-fn outbox(args: OutboxArgs) -> Result<i32> {
-    let db = assistants::connect()?;
+fn outbox(dirs: &Dirs, args: OutboxArgs) -> Result<i32> {
+    let db = assistants::connect(dirs)?;
     if let Some(command) = &args.deliver {
         let sent = assistants::deliver(&db, command, args.name.as_deref())?;
         note(&format!("delivered {sent}"));
@@ -699,8 +746,8 @@ fn outbox(args: OutboxArgs) -> Result<i32> {
 }
 
 /// approve and reject: one verb, two words for the same record.
-fn decide(args: DecideArgs, approve: bool) -> Result<i32> {
-    let db = assistants::connect()?;
+fn decide(dirs: &Dirs, args: DecideArgs, approve: bool) -> Result<i32> {
+    let db = assistants::connect(dirs)?;
     let changed = assistants::decide(&db, &args.id, approve)?;
     note(&format!(
         "{changed} {}",
@@ -712,8 +759,8 @@ fn decide(args: DecideArgs, approve: bool) -> Result<i32> {
     Ok(0)
 }
 
-fn runs(args: RunsArgs) -> Result<i32> {
-    let db = assistants::connect()?;
+fn runs(dirs: &Dirs, args: RunsArgs) -> Result<i32> {
+    let db = assistants::connect(dirs)?;
     let found = assistants::history(&db, args.name.as_deref(), args.limit)?;
     for r in &found {
         let took = r.ended_at.map_or_else(
@@ -742,4 +789,26 @@ fn runs(args: RunsArgs) -> Result<i32> {
         note("no wakeups recorded");
     }
     Ok(0)
+}
+
+/// The flags that chose this image, for a command the user is told to run.
+fn selectors(spec: &sanduk::run::ImageSpec) -> String {
+    let mut parts: Vec<String> = spec
+        .recipe
+        .iter()
+        .map(|r| format!("--recipe {r}"))
+        .collect();
+    if parts.is_empty() || spec.image.is_some() {
+        parts.push(format!(
+            "--agent {}",
+            spec.agent
+                .as_deref()
+                .unwrap_or(sanduk::agent::DEFAULT_AGENT)
+        ));
+    }
+    parts.extend(spec.kits.iter().map(|k| format!("--kit {k}")));
+    if let Some(image) = &spec.image {
+        parts.push(format!("--image {image}"));
+    }
+    parts.join(" ")
 }

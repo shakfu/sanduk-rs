@@ -3,7 +3,7 @@
 # stub upstream, --base_url, OPENROUTER_BASE_URL and config.yaml's model.base_url each left the call
 # going to openrouter.ai. So it runs in --mode open only, where the container holds the key.
 name = "hermes"
-description = "hermes-agent; OpenAI Chat Completions, --mode open only"
+description = "hermes-agent; OpenAI Chat Completions, open mode only"
 recipe = "hermes"
 skills_dir = ".hermes/skills"
 protocols = ["openai-chat"]
@@ -19,7 +19,7 @@ argv = [
 [check]
 # hermes resolves a bare name against OpenRouter's catalogue; there is no default worth guessing.
 require = ["model"]
-relay = "hermes cannot be pointed at the relay: 0.19.0 ignores --base_url, OPENROUTER_BASE_URL and config.yaml's base_url alike. Use --mode open, where the container holds the key."
+relay = "hermes cannot be pointed at the relay: 0.19.0 ignores --base_url, OPENROUTER_BASE_URL and config.yaml's base_url alike. Use open mode, where the container holds the key."
 
 [wire]
 # The environment, not the --api_key flag: an argv is visible to `inspect`.

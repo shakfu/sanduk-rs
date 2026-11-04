@@ -1,6 +1,6 @@
 # sanduk as a library
 
-Status: proposal, 2026-11-04. Nothing here is built. pma is the main intended consumer, so its needs set the API. Claims about pma cite its source at `main`. Build-cost figures not marked as measured are inference.
+Status: steps 1-7 built, 2026-11-04; step 8 (publish) not done. Where the build departs from this plan is under [As built](#as-built). What is verified, and what to run next: [refactor-as-library-status.md](refactor-as-library-status.md). pma is the main intended consumer, so its needs set the API. Claims about pma cite its source at `main`. Build-cost figures not marked as measured are inference.
 
 ## Problem
 
@@ -195,6 +195,32 @@ Each step leaves the CLI's tests passing and its output unchanged.
 6. **Split the crates.** Move the CLI, assistants and `rusqlite` into `sanduk-cli`, and `runs.rs` into `sanduk-container`.
 7. **A test engine for callers.** `sanduk-container`'s tests drive a fake `Exec` (`crates/sanduk-container/tests/engine.rs`). Expose it behind a `test-util` feature, so pma can test dispatch through `Plan`, `start` and `finish` without Docker.
 8. **Publish** `sanduk-container`, `sanduk` and `sanduk-cli` together.
+
+## As built
+
+Departures from the plan above, each with its reason:
+
+- **`Options` is a struct with `Default`, not a builder.** It has 45 fields, one per `run` flag. Struct-update syntax (`..Options::default()`) reads the same as chained setters, with no setter to write per field.
+- **The observer is set once, on `Sanduk`, as `Arc<dyn Observer>`.** The relay notes from its own thread, so `Observer` is `Send + Sync` and takes `&self`. `Observer::cancelled` replaces the signal: the CLI's observer answers from `Signals`.
+- **`finish` takes `impl Into<Ended>`: `exit`, `ok`, `keep`.** `From<ExitStatus>` gives `ok` as success. The CLI sets `ok` from the stream's terminal record, which an exit status does not carry.
+- **`Outcome.returned` is `Returned::{Unchanged, Branch, Kept}`.** `Kept` holds the path and an `ErrorKind::Return` error. One field, rather than `returned` beside `kept`: the three cases exclude each other.
+- **`Outcome.report` is an open `File`.** `finish` removes a returned clone, and the report is inside it. The handle outlives the directory.
+- **`ErrorKind` adds `Interrupted` and `Other`.** `start` needs a kind for a cancel. `Other` marks an error no phase has classified yet. `plan` defaults it to `Refused`, `start` to `Setup`.
+- **No `.interactive(true)`.** No flag needs `-t` today. `stdin` gives `-i`.
+- **The stream reader stays in `sanduk`.** Loading an agent checks its `stream` name against the readers. The module needs only `serde_json`, so moving it saves no dependency.
+- **The reaper's names file lists containers only.** Networks belong to a mode and are shared by every run under it. No run owns one to reap.
+- **`Exec::command` is new.** The agent, `--verify` and the return step run through the engine's `Exec`, so `testing::Fake` can stand in for them. `--verify` output reaches the observer as `Note::Output` lines. The CLI used to inherit stderr for it.
+- **`preserve_order` was not only a relay concern.** Recipe and kit `env` is JSON, and its order reaches the Containerfile, which the image tag hashes. `sections::env_order` reads that one key order with `IndexMap`. Agent `wire.env`, including `{ json = ... }` values, keeps its order through `toml::Spanned` keys. The golden tests against Python check both, so neither change was left as accepted drift.
+- **`Clone::plan` refuses an existing path.** The caller now names the path, so it can name one already in use.
+- **`Plan::describe` creates the mode's network** under a keyed mode, to learn the gateway, as `--dry-run` did.
+- **The hidden `sanduk reap` subcommand is gone.** Nothing starts it.
+- **No library message names a CLI flag.** `Error::option` names the `Options` field an error is about, and `message` reads after it: `mounts "x": expected HOST:DEST[:ro]`. The CLI swaps the field for its flag. A field over a rendered string: pma names options in its own config, not in sanduk's flags. - **`Error::detail` carries the facts a caller may offer its own fix for.** One variant so far: `Detail::AgentUid`, an image whose agent uid cannot write the workdir. The CLI prints `sanduk build --force ...` from it, and only as the user a rebuild would help: a build runs as the caller's uid. Facts over a remedy: the right fix depends on who runs it, which only the caller knows. A variant is added only where a caller has a remedy, so the type does not grow one per message.
+- **Image builds stream.** `Engine::build_image_lines` reads the build's output through `Exec::command`, and the run sends each line as `Note::Build`. The engine's terminal progress display is lost to the CLI: its output is a pipe now.
+
+Not done:
+
+- Step 8, publishing.
+- Build time and binary size were not measured against pma. Dependency count, from `cargo tree -e normal`: `sanduk` 89 crates, `sanduk-cli` 116.
 
 ## What changes in pma
 

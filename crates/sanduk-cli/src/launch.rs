@@ -1,5 +1,6 @@
 //! Running the agent: stream its output through a reader, under a timeout and the signals that
-//! should end it.
+//! should end it. The CLI's: a library caller starts [`Live::command`](sanduk::run::Live::command)
+//! its own way.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -9,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::{Agent, Outcome};
-use crate::error::{Error, Result};
+use sanduk::agent::{Agent, Outcome};
+use sanduk::error::{Error, Result};
 
 static CAUGHT: AtomicI32 = AtomicI32::new(0);
 
@@ -52,52 +53,6 @@ impl Drop for Signals {
     }
 }
 
-/// How a check ended. `code` is `None` when it was killed: at the deadline, or by a signal.
-pub struct Checked {
-    pub code: Option<i32>,
-    pub timed_out: bool,
-}
-
-/// Runs a check, such as `--verify`, with its output on stderr: stdout may be carrying an agent's
-/// stream. Its own process group, killed whole at `timeout` or on a signal, as [`launch`] does.
-pub fn check(argv: &[String], timeout: Duration) -> Result<Checked> {
-    use std::os::fd::AsFd;
-    use std::os::unix::process::CommandExt;
-
-    let (program, args) = argv
-        .split_first()
-        .ok_or_else(|| Error::new("empty command"))?;
-    let out = std::io::stderr().as_fd().try_clone_to_owned()?;
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(out))
-        .process_group(0)
-        .spawn()
-        .map_err(|e| Error::new(format!("{program}: {e}")))?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(Checked {
-                code: status.code(),
-                timed_out: false,
-            });
-        }
-        let late = Instant::now() >= deadline;
-        if late || Signals::caught().is_some() {
-            // SAFETY: kill takes no pointers, and the child is not yet reaped, so its pid, which
-            // is also its group's id, is still ours.
-            unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGKILL) };
-            child.wait()?;
-            return Ok(Checked {
-                code: None,
-                timed_out: late,
-            });
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-}
-
 /// How the run ended, when it ended on its own.
 pub struct Ran {
     pub outcome: Option<Outcome>,
@@ -115,21 +70,15 @@ pub struct Ran {
 /// is delivered.
 pub fn launch(
     agent: &Agent,
-    argv: &[String],
+    mut command: Command,
     timeout: Duration,
     quiet: bool,
-    env: &[(String, String)],
     attach_stdin: bool,
     passthrough: bool,
 ) -> Result<Ran> {
     let mut reader = agent.reader();
-    let (program, args) = argv
-        .split_first()
-        .ok_or_else(|| Error::new("empty command"))?;
-    let mut command = Command::new(program);
+    let program = command.get_program().to_string_lossy().into_owned();
     command
-        .args(args)
-        .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(if attach_stdin {
             Stdio::inherit()
         } else {

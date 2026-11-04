@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 
 use crate::error::{Error, Result};
 use crate::resources;
-use crate::util::config_dir;
+use crate::util::Dirs;
 
 pub static NAME_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9-]*$").unwrap());
@@ -70,17 +70,17 @@ pub enum Origin {
     Path,
 }
 
-fn roots() -> Result<[(Origin, PathBuf); 2]> {
+fn roots(dirs: &Dirs) -> Result<[(Origin, PathBuf); 2]> {
     Ok([
-        (Origin::Shipped, resources::root()?),
-        (Origin::User, config_dir()),
+        (Origin::Shipped, resources::root(&dirs.cache)?),
+        (Origin::User, dirs.config.clone()),
     ])
 }
 
 /// Every name of this kind the catalogue can find.
-pub fn names(kind: Kind) -> Result<Vec<String>> {
+pub fn names(dirs: &Dirs, kind: Kind) -> Result<Vec<String>> {
     let mut found = Vec::new();
-    for (_, root) in roots()? {
+    for (_, root) in roots(dirs)? {
         let Ok(entries) = std::fs::read_dir(root.join(kind.dir())) else {
             continue;
         };
@@ -104,7 +104,12 @@ pub fn names(kind: Kind) -> Result<Vec<String>> {
 }
 
 /// The file a spec names, and where it came from: a catalogue name, or a path.
-pub fn locate(kind: Kind, spec: &str, relative_to: Option<&Path>) -> Result<(PathBuf, Origin)> {
+pub fn locate(
+    dirs: &Dirs,
+    kind: Kind,
+    spec: &str,
+    relative_to: Option<&Path>,
+) -> Result<(PathBuf, Origin)> {
     let singular = kind.singular();
     if is_path(spec) {
         let expanded = match spec.strip_prefix("~/") {
@@ -133,14 +138,14 @@ pub fn locate(kind: Kind, spec: &str, relative_to: Option<&Path>) -> Result<(Pat
              .json or .toml)"
         )));
     }
-    let hits: Vec<(Origin, PathBuf)> = roots()?
+    let hits: Vec<(Origin, PathBuf)> = roots(dirs)?
         .into_iter()
         .map(|(origin, root)| (origin, entry_path(kind, &root, spec)))
         .filter(|(_, path)| path.is_file())
         .collect();
     match hits.as_slice() {
         [] => {
-            let known = names(kind)?;
+            let known = names(dirs, kind)?;
             let known = if known.is_empty() {
                 "none".into()
             } else {

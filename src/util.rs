@@ -6,13 +6,6 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{Error, Result};
 
-pub const PROG: &str = "sanduk";
-
-/// One progress line on stderr, so stdout stays the agent's.
-pub fn note(msg: &str) {
-    eprintln!("{PROG}: {msg}");
-}
-
 fn home() -> PathBuf {
     std::env::var_os("HOME").map_or_else(|| PathBuf::from("/"), PathBuf::from)
 }
@@ -24,37 +17,44 @@ fn xdg(var: &str, fallback: &[&str]) -> PathBuf {
     }
 }
 
-thread_local! {
-    /// Set by tests, which run in parallel threads: an environment variable is process-wide.
-    static CONFIG_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
-    static STATE_OVERRIDE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+/// Where sanduk keeps what it reads and writes. A value, not process state: two callers in one
+/// process may point at different directories.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dirs {
+    /// User agents, recipes and kits.
+    pub config: PathBuf,
+    /// What outlives a run: run records, clones. Bookkeeping, not the user's work.
+    pub state: PathBuf,
+    /// What can be made again: the shipped resources.
+    pub cache: PathBuf,
 }
 
-/// Points this thread's config and state directories elsewhere. For tests.
-#[doc(hidden)]
-pub fn override_dirs(config: Option<PathBuf>, state: Option<PathBuf>) {
-    CONFIG_OVERRIDE.with(|c| *c.borrow_mut() = config);
-    STATE_OVERRIDE.with(|s| *s.borrow_mut() = state);
+impl Default for Dirs {
+    /// `XDG_CONFIG_HOME/sanduk`, `XDG_STATE_HOME/sanduk` and `XDG_CACHE_HOME/sanduk`, each falling
+    /// back to its `~/.config`, `~/.local/state` or `~/.cache` default.
+    fn default() -> Self {
+        Dirs {
+            config: xdg("XDG_CONFIG_HOME", &[".config"]).join("sanduk"),
+            state: xdg("XDG_STATE_HOME", &[".local", "state"]).join("sanduk"),
+            cache: xdg("XDG_CACHE_HOME", &[".cache"]).join("sanduk"),
+        }
+    }
 }
 
-/// `XDG_CONFIG_HOME/sanduk`, or `~/.config/sanduk`: user agents, recipes and kits.
-pub fn config_dir() -> PathBuf {
-    CONFIG_OVERRIDE
-        .with(|c| c.borrow().clone())
-        .unwrap_or_else(|| xdg("XDG_CONFIG_HOME", &[".config"]).join("sanduk"))
-}
+impl Dirs {
+    /// All three under `root`: `root/config`, `root/state`, `root/cache`. For tests.
+    pub fn under(root: &Path) -> Self {
+        Dirs {
+            config: root.join("config"),
+            state: root.join("state"),
+            cache: root.join("cache"),
+        }
+    }
 
-/// `XDG_STATE_HOME/sanduk`, or `~/.local/state/sanduk`: what outlives a run. Bookkeeping, not
-/// the user's work.
-pub fn state_dir() -> PathBuf {
-    STATE_OVERRIDE
-        .with(|s| s.borrow().clone())
-        .unwrap_or_else(|| xdg("XDG_STATE_HOME", &[".local", "state"]).join("sanduk"))
-}
-
-/// `XDG_CACHE_HOME/sanduk`, or `~/.cache/sanduk`: what can be made again.
-pub fn cache_dir() -> PathBuf {
-    xdg("XDG_CACHE_HOME", &[".cache"]).join("sanduk")
+    /// Where run records live.
+    pub fn runs(&self) -> PathBuf {
+        self.state.join("runs")
+    }
 }
 
 /// A duration: a bare number is seconds, a suffix of s, m, h or d multiplies it. Every duration
@@ -120,13 +120,14 @@ pub fn token(n: usize) -> Result<String> {
     Ok(out)
 }
 
-/// `path` opened for reading, or `None` if it is not an ordinary file.
+/// `path` opened for reading. `Err(None)` when nothing is there; `Err(Some(why))` when something
+/// is, but it is not an ordinary file.
 ///
 /// For anything the agent writes: it owns the mount, so a symlink it leaves there names a path
 /// this process resolves against the host root. `O_NOFOLLOW` rather than a symlink test, which
 /// the agent can swap between the test and the open. `O_NONBLOCK`, because a fifo at that name
 /// blocks the open until something writes to it.
-pub fn open_unfollowed(path: &Path) -> Option<File> {
+pub fn open_unfollowed(path: &Path) -> std::result::Result<File, Option<String>> {
     use std::os::unix::fs::OpenOptionsExt;
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -138,27 +139,24 @@ pub fn open_unfollowed(path: &Path) -> Option<File> {
     let file = match file {
         Ok(file) => file,
         Err(_) => {
-            if let Ok(target) = std::fs::read_link(path) {
-                note(&format!(
-                    "refusing {name}: a symlink to {}",
-                    target.display()
-                ));
-            }
-            return None;
+            return Err(std::fs::read_link(path)
+                .ok()
+                .map(|target| format!("refusing {name}: a symlink to {}", target.display())));
         }
     };
     if !file.metadata().is_ok_and(|m| m.is_file()) {
-        note(&format!("refusing {name}: not a regular file"));
-        return None;
+        return Err(Some(format!("refusing {name}: not a regular file")));
     }
-    Some(file)
+    Ok(file)
 }
 
-/// The text of `path`, or `None` if it is not an ordinary file.
-pub fn read_unfollowed(path: &Path) -> Option<String> {
+/// The text of `path`, as [`open_unfollowed`] opens it.
+pub fn read_unfollowed(path: &Path) -> std::result::Result<String, Option<String>> {
     let mut text = Vec::new();
-    open_unfollowed(path)?.read_to_end(&mut text).ok()?;
-    Some(String::from_utf8_lossy(&text).into_owned())
+    open_unfollowed(path)?
+        .read_to_end(&mut text)
+        .map_err(|e| Some(e.to_string()))?;
+    Ok(String::from_utf8_lossy(&text).into_owned())
 }
 
 /// Copies an opened file to `dest`, following no symlink there: the destination can itself be

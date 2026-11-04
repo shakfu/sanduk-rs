@@ -20,11 +20,12 @@ use sanduk_container::{AGENT_UID_LABEL, CONTAINER_PREFIX, Engine};
 use crate::catalog::{self, Kind, NAME_RE, SHA256_RE};
 use crate::error::{Error, Result};
 use crate::kits::{self, Kit};
+use crate::observe::{Observer, info};
 use crate::sections::{
     self, Context, EnvMap, Section, TYPES, USER_RE, exec_form, fail, matching, path_value, render,
     strings, text,
 };
-use crate::util::{note, py_json_list, random_hex};
+use crate::util::{Dirs, py_json_list, random_hex};
 
 const RECIPE_KEYS: [&str; 13] = [
     "name",
@@ -112,8 +113,8 @@ struct File {
     recipe: Recipe,
 }
 
-fn read(path: &Path) -> Result<File> {
-    let (_, data) = catalog::read_json(path, &RECIPE_KEYS)?;
+fn read(dirs: &Dirs, path: &Path) -> Result<File> {
+    let (raw, data) = catalog::read_json(path, &RECIPE_KEYS)?;
     let where_ = &path.display().to_string();
     let dir = path.parent().expect("a file has a directory");
     let stem = path
@@ -179,7 +180,7 @@ fn read(path: &Path) -> Result<File> {
         where_,
         "section",
     )?;
-    recipe.env = sections::env_map(data.get("env"), where_)?;
+    recipe.env = sections::env_map(data.get("env"), &sections::env_order(&raw), where_)?;
     if let Some(value) = data.get("instructions") {
         recipe.instructions = vec![Instructions {
             owner: name.clone(),
@@ -190,7 +191,7 @@ fn read(path: &Path) -> Result<File> {
         None => Vec::new(),
         Some(Value::Array(items)) => items
             .iter()
-            .map(|e| kit_entry(e, where_, dir, &name))
+            .map(|e| kit_entry(dirs, e, where_, dir, &name))
             .collect::<Result<_>>()?,
         Some(_) => return Err(fail(where_, "kits must be a list")),
     };
@@ -304,7 +305,7 @@ fn read_instructions(value: &Value, where_: &str, base: &Path) -> Result<String>
     Ok(body)
 }
 
-fn kit_entry(raw: &Value, where_: &str, dir: &Path, owner: &str) -> Result<KitUse> {
+fn kit_entry(dirs: &Dirs, raw: &Value, where_: &str, dir: &Path, owner: &str) -> Result<KitUse> {
     let shape = "each kit is {\"name\": ..., \"sha256\": ...} or {\"path\": ..., \"sha256\": ...}";
     let Some(raw) = raw
         .as_object()
@@ -315,6 +316,7 @@ fn kit_entry(raw: &Value, where_: &str, dir: &Path, owner: &str) -> Result<KitUs
     let pin = matching(raw.get("sha256"), &SHA256_RE, where_, "kit sha256")?.to_string();
     let kit = if raw.contains_key("name") {
         kits::load(
+            dirs,
             matching(raw.get("name"), &NAME_RE, where_, "kit name")?,
             None,
         )?
@@ -325,7 +327,7 @@ fn kit_entry(raw: &Value, where_: &str, dir: &Path, owner: &str) -> Result<KitUs
         } else {
             format!("./{spec}")
         };
-        kits::load(&spec, Some(dir))?
+        kits::load(dirs, &spec, Some(dir))?
     } else {
         return Err(fail(where_, "a kit entry needs name or path"));
     };
@@ -437,15 +439,23 @@ fn apply_remove(
 
 /// A recipe by name or path, with its parents merged and its kit pins checked. `extra_kits` are
 /// added unpinned, as `--kit` on the command line.
-pub fn resolve(spec: &str, extra_kits: &[String]) -> Result<Recipe> {
-    let (path, _) = catalog::locate(Kind::Recipes, spec, None)?;
-    let mut recipe = resolve_path(&path, &[])?;
+pub fn resolve(
+    dirs: &Dirs,
+    spec: &str,
+    extra_kits: &[String],
+    obs: &dyn Observer,
+) -> Result<Recipe> {
+    let (path, _) = catalog::locate(dirs, Kind::Recipes, spec, None)?;
+    let mut recipe = resolve_path(dirs, &path, &[])?;
     for kit_spec in extra_kits {
-        let kit = kits::load(kit_spec, None)?;
-        note(&format!(
-            "kit {} is unpinned here; its sha256 is {}",
-            kit.name, kit.sha256
-        ));
+        let kit = kits::load(dirs, kit_spec, None)?;
+        info(
+            obs,
+            format!(
+                "kit {} is unpinned here; its sha256 is {}",
+                kit.name, kit.sha256
+            ),
+        );
         let used = KitUse {
             kit,
             pin: None,
@@ -513,8 +523,8 @@ pub fn resolve(spec: &str, extra_kits: &[String]) -> Result<Recipe> {
     Ok(recipe)
 }
 
-fn resolve_path(path: &Path, chain: &[(PathBuf, String)]) -> Result<Recipe> {
-    let file = read(path)?;
+fn resolve_path(dirs: &Dirs, path: &Path, chain: &[(PathBuf, String)]) -> Result<Recipe> {
+    let file = read(dirs, path)?;
     let mut chain = chain.to_vec();
     chain.push((path.to_path_buf(), file.name.clone()));
     let mut merged = Recipe {
@@ -523,16 +533,16 @@ fn resolve_path(path: &Path, chain: &[(PathBuf, String)]) -> Result<Recipe> {
         ..Recipe::default()
     };
     for parent_spec in &file.inherits {
-        let (parent, _) = catalog::locate(Kind::Recipes, parent_spec, path.parent())?;
+        let (parent, _) = catalog::locate(dirs, Kind::Recipes, parent_spec, path.parent())?;
         if chain.iter().any(|(p, _)| *p == parent) {
             let mut names: Vec<String> = chain.iter().map(|(_, n)| n.clone()).collect();
-            names.push(read(&parent)?.name);
+            names.push(read(dirs, &parent)?.name);
             return Err(Error::new(format!(
                 "recipe inheritance cycle: {}",
                 names.join(" -> ")
             )));
         }
-        let parent = resolve_path(&parent, &chain)?;
+        let parent = resolve_path(dirs, &parent, &chain)?;
         merge(&mut merged, &parent);
     }
     apply_remove(&mut merged, &file.remove, &path.display().to_string())?;
@@ -836,7 +846,13 @@ pub fn repository(recipe_name: &str) -> String {
 }
 
 /// Writes the context to a scratch directory and builds it.
-pub fn build(engine: &Engine, image: &str, rendered: &Rendered) -> Result<()> {
+/// Builds `rendered` as `image`, with each line of the build's output passed to `line`.
+pub fn build(
+    engine: &Engine,
+    image: &str,
+    rendered: &Rendered,
+    line: &mut dyn FnMut(&str),
+) -> Result<()> {
     let scratch = std::env::temp_dir().join(format!("sanduk-build-{}", random_hex(12)?));
     let written = (|| -> Result<()> {
         std::fs::create_dir_all(&scratch)?;
@@ -848,7 +864,7 @@ pub fn build(engine: &Engine, image: &str, rendered: &Rendered) -> Result<()> {
             }
             std::fs::write(target, data)?;
         }
-        Ok(engine.build_image(image, &scratch.join("Containerfile"))?)
+        Ok(engine.build_image_lines(image, &scratch.join("Containerfile"), line)?)
     })();
     let _ = std::fs::remove_dir_all(&scratch);
     written

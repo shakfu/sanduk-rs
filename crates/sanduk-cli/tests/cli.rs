@@ -104,9 +104,14 @@ impl World {
         std::fs::read_to_string(self.path("docker/containers")).unwrap_or_default()
     }
 
+    /// Run records; each has a names file beside it.
     fn records(&self) -> usize {
         std::fs::read_dir(self.path("state/sanduk/runs"))
-            .map(|d| d.count())
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+                    .count()
+            })
             .unwrap_or(0)
     }
 }
@@ -813,6 +818,12 @@ fn an_image_whose_agent_cannot_write_the_workdir_is_refused() {
     assert_eq!(out.status.code(), Some(2));
     assert!(
         stderr(&out).contains("runs its agent as uid 4242, which cannot write"),
+        "{}",
+        stderr(&out)
+    );
+    // The workdir is this user's, so this user's rebuild fixes it.
+    assert!(
+        stderr(&out).contains("sanduk build --force --agent claude --runtime docker"),
         "{}",
         stderr(&out)
     );

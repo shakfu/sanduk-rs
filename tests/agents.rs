@@ -5,7 +5,16 @@ use std::path::Path;
 
 use sanduk::agent::{self, Endpoint, Options, stream};
 use sanduk::providers::{Scheme, get_provider};
-use sanduk::{recipes, util};
+use sanduk::recipes;
+use sanduk::util::Dirs;
+
+/// The shipped catalogue, and an empty user one.
+fn dirs() -> Dirs {
+    Dirs {
+        config: std::env::temp_dir().join(format!("sanduk-no-config-{}", std::process::id())),
+        ..Dirs::default()
+    }
+}
 use serde_json::{Map, Value};
 
 fn golden() -> Value {
@@ -37,7 +46,7 @@ fn every_shipped_agent_wires_and_drives_as_python_sanduk_does() {
     let cases = golden["cases"].as_array().unwrap();
     assert!(cases.len() > 900);
     for case in cases {
-        let agent = agent::get(case["agent"].as_str().unwrap()).unwrap();
+        let agent = agent::get(&dirs(), case["agent"].as_str().unwrap()).unwrap();
         let provider = get_provider(case["provider"].as_str().unwrap()).unwrap();
         let opts = options(case);
         let at = Endpoint {
@@ -129,7 +138,7 @@ fn every_stream_reads_as_python_sanduk_reads_it() {
 
 #[test]
 fn the_shipped_agents_are_found_and_each_names_a_recipe_that_builds_it() {
-    let names = agent::names().unwrap();
+    let names = agent::names(&dirs()).unwrap();
     assert_eq!(
         names,
         [
@@ -137,15 +146,15 @@ fn the_shipped_agents_are_found_and_each_names_a_recipe_that_builds_it() {
         ]
     );
     for name in names {
-        let agent = agent::get(&name).unwrap();
-        let recipe = recipes::resolve(agent.recipe.as_deref().unwrap(), &[]).unwrap();
+        let agent = agent::get(&dirs(), &name).unwrap();
+        let recipe = recipes::resolve(&dirs(), agent.recipe.as_deref().unwrap(), &[], &()).unwrap();
         assert_eq!(recipe.agent, name);
     }
 }
 
 #[test]
 fn an_unknown_agent_names_the_known_ones() {
-    let refused = agent::get("gemini").unwrap_err();
+    let refused = agent::get(&dirs(), "gemini").unwrap_err();
     assert!(
         refused.message.contains("known: claude, codex"),
         "{}",
@@ -169,7 +178,7 @@ impl Spec {
     }
 
     fn load(&self) -> Result<agent::Agent, String> {
-        agent::get(self.0.to_str().unwrap()).map_err(|e| e.message)
+        agent::get(&dirs(), self.0.to_str().unwrap()).map_err(|e| e.message)
     }
 }
 
@@ -280,9 +289,11 @@ fn a_user_agent_cannot_take_a_shipped_name() {
         MINIMAL.replace("\"mine\"", "\"claude\""),
     )
     .unwrap();
-    util::override_dirs(Some(dir.clone()), None);
-    let refused = agent::get("claude").unwrap_err();
-    util::override_dirs(None, None);
+    let shadowed = Dirs {
+        config: dir.clone(),
+        ..dirs()
+    };
+    let refused = agent::get(&shadowed, "claude").unwrap_err();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         refused
@@ -318,7 +329,9 @@ fn an_overridden_key_variable_is_the_one_the_config_blob_names() {
         ("pi", "SANDUK_MODELS_JSON", "$MY_KEY"),
         ("prime", "SANDUK_MODELS_JSON", "\"MY_KEY\""),
     ] {
-        let wiring = agent::get(name).unwrap().wire(&opts, &at_relay(provider));
+        let wiring = agent::get(&dirs(), name)
+            .unwrap()
+            .wire(&opts, &at_relay(provider));
         assert_eq!(wiring.key_env, "MY_KEY");
         let blob = &wiring.env.iter().find(|(k, _)| k == var).unwrap().1;
         assert!(blob.contains(expected), "{name}: {blob}");
@@ -333,7 +346,7 @@ fn codex_config_values_are_quoted_as_toml() {
         key_env: Some("K\"EY".into()),
         ..Options::default()
     };
-    let codex = agent::get("codex").unwrap();
+    let codex = agent::get(&dirs(), "codex").unwrap();
     let at = at_relay(provider);
     let wiring = codex.wire(&opts, &at);
     let argv = codex.argv(&opts, &at, "go", &wiring).unwrap();
@@ -344,9 +357,10 @@ fn codex_config_values_are_quoted_as_toml() {
 }
 
 #[test]
-fn refusals_name_the_flag_and_the_agent() {
+/// A refusal names the option as a field, not a flag: the CLI's flags are its own.
+fn refusals_name_the_option_and_the_agent() {
     let provider = get_provider("openai").unwrap();
-    let hax = agent::get("hax").unwrap();
+    let hax = agent::get(&dirs(), "hax").unwrap();
     let refused = hax
         .check(
             &Options {
@@ -356,13 +370,13 @@ fn refusals_name_the_flag_and_the_agent() {
             provider,
         )
         .unwrap_err();
-    assert_eq!(refused.message, "--allowed-tools has no hax equivalent");
-    let pi = agent::get("pi").unwrap();
-    assert_eq!(
-        pi.check(&Options::default(), provider).unwrap_err().message,
-        "--model is required with --agent pi"
-    );
-    let claude = agent::get("claude").unwrap();
+    assert_eq!(refused.option, Some("allowed_tools"));
+    assert_eq!(refused.to_string(), "allowed_tools has no hax equivalent");
+    let pi = agent::get(&dirs(), "pi").unwrap();
+    let refused = pi.check(&Options::default(), provider).unwrap_err();
+    assert_eq!(refused.option, Some("model"));
+    assert_eq!(refused.to_string(), "model is required with agent pi");
+    let claude = agent::get(&dirs(), "claude").unwrap();
     assert!(
         claude
             .check(&Options::default(), provider)
@@ -370,7 +384,7 @@ fn refusals_name_the_flag_and_the_agent() {
             .message
             .contains("cannot talk to the openai provider")
     );
-    let hermes = agent::get("hermes").unwrap();
+    let hermes = agent::get(&dirs(), "hermes").unwrap();
     let relayed = Options {
         relayed: true,
         model: Some("m".into()),
@@ -381,6 +395,6 @@ fn refusals_name_the_flag_and_the_agent() {
             .check(&relayed, provider)
             .unwrap_err()
             .message
-            .contains("Use --mode open")
+            .contains("Use open mode")
     );
 }

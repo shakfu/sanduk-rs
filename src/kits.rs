@@ -16,7 +16,7 @@ use crate::error::{Error, Result};
 use crate::sections::{
     self, Context, EnvMap, Section, URL_RE, fail, matching, path_value, run_line, strings, text,
 };
-use crate::util::shell_quote as q;
+use crate::util::{Dirs, shell_quote as q};
 
 const KIT_KEYS: [&str; 9] = [
     "name",
@@ -64,8 +64,8 @@ pub fn digest(data: &[u8]) -> String {
 }
 
 /// Reads and checks a kit by catalogue name or path.
-pub fn load(spec: &str, relative_to: Option<&Path>) -> Result<Kit> {
-    let (path, _) = catalog::locate(Kind::Kits, spec, relative_to)?;
+pub fn load(dirs: &Dirs, spec: &str, relative_to: Option<&Path>) -> Result<Kit> {
+    let (path, _) = catalog::locate(dirs, Kind::Kits, spec, relative_to)?;
     let (raw, data) = catalog::read_json(&path, &KIT_KEYS)?;
     let where_ = &path.display().to_string();
     let dir = path.parent().expect("kit.json has a directory");
@@ -157,7 +157,7 @@ pub fn load(spec: &str, relative_to: Option<&Path>) -> Result<Kit> {
         description,
         tools,
         skills,
-        env: sections::env_map(data.get("env"), where_)?,
+        env: sections::env_map(data.get("env"), &sections::env_order(&raw), where_)?,
         agents,
         egress: flag("egress")?,
         provides,

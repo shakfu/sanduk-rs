@@ -6,7 +6,26 @@
 use std::path::{Path, PathBuf};
 
 use sanduk::recipes::{self, Recipe};
-use sanduk::{catalog, kits, util};
+use sanduk::util::Dirs;
+use sanduk::{catalog, kits};
+
+thread_local! {
+    /// The directories this thread's test points at. The library takes them as a value; a test
+    /// keeps them here so its helpers need no extra argument.
+    static DIRS: std::cell::RefCell<Option<Dirs>> = const { std::cell::RefCell::new(None) };
+}
+
+fn set_dirs(dirs: Option<Dirs>) {
+    DIRS.with(|d| *d.borrow_mut() = dirs);
+}
+
+/// This thread's directories: what a scratch fixture set, else an empty user catalogue.
+fn dirs() -> Dirs {
+    DIRS.with(|d| d.borrow().clone()).unwrap_or_else(|| Dirs {
+        config: std::env::temp_dir().join(format!("sanduk-no-config-{}", std::process::id())),
+        ..Dirs::default()
+    })
+}
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -62,7 +81,11 @@ impl Root {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("recipes")).unwrap();
         std::fs::create_dir_all(dir.join("kits")).unwrap();
-        util::override_dirs(Some(dir.clone()), Some(dir.join("state")));
+        set_dirs(Some(Dirs {
+            config: dir.clone(),
+            state: dir.join("state"),
+            ..Dirs::default()
+        }));
         Root(dir)
     }
 
@@ -101,7 +124,7 @@ impl Root {
 
 impl Drop for Root {
     fn drop(&mut self) {
-        util::override_dirs(None, None);
+        set_dirs(None);
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -111,11 +134,13 @@ fn skill_md(name: &str) -> String {
 }
 
 fn resolve(name: &str) -> Recipe {
-    recipes::resolve(name, &[]).unwrap()
+    recipes::resolve(&dirs(), name, &[], &()).unwrap()
 }
 
 fn err(name: &str) -> String {
-    recipes::resolve(name, &[]).unwrap_err().message
+    recipes::resolve(&dirs(), name, &[], &())
+        .unwrap_err()
+        .message
 }
 
 fn rendered(name: &str, skills_dir: Option<&str>) -> String {
@@ -167,7 +192,9 @@ fn golden(name: &str) -> PathBuf {
 #[test]
 fn every_shipped_recipe_renders_as_python_sanduk_does() {
     assert_eq!(
-        catalog::names(catalog::Kind::Recipes).unwrap().len(),
+        catalog::names(&dirs(), catalog::Kind::Recipes)
+            .unwrap()
+            .len(),
         AGENTS.len()
     );
     for (name, skills_dir, instructions_file) in AGENTS {
@@ -214,7 +241,7 @@ fn every_shipped_recipe_renders_as_python_sanduk_does() {
 
 #[test]
 fn every_shipped_recipe_renders_the_invariants() {
-    for name in catalog::names(catalog::Kind::Recipes).unwrap() {
+    for name in catalog::names(&dirs(), catalog::Kind::Recipes).unwrap() {
         let text = rendered(&name, Some(".agents/skills"));
         assert!(
             text.contains("ARG AGENT_UID=1000")
@@ -246,12 +273,12 @@ fn the_shipped_docs_kit_is_pinned_by_claude_docs() {
 /// Every shipped kit reads: its downloads are pinned and its tools are well formed.
 #[test]
 fn every_shipped_kit_loads() {
-    let names = catalog::names(catalog::Kind::Kits).unwrap();
+    let names = catalog::names(&dirs(), catalog::Kind::Kits).unwrap();
     for name in ["build", "rust", "go", "uv"] {
         assert!(names.iter().any(|n| n == name), "{name} is not shipped");
     }
     for name in &names {
-        kits::load(name, None).unwrap_or_else(|e| panic!("{name}: {}", e.message));
+        kits::load(&dirs(), name, None).unwrap_or_else(|e| panic!("{name}: {}", e.message));
     }
 }
 
@@ -260,7 +287,7 @@ fn every_shipped_kit_loads() {
 #[test]
 fn the_toolchain_kits_compose_on_one_image() {
     let kits: Vec<String> = ["build", "rust", "go", "uv"].map(String::from).into();
-    let recipe = recipes::resolve("claude", &kits).unwrap();
+    let recipe = recipes::resolve(&dirs(), "claude", &kits, &()).unwrap();
     let rendered = recipes::render_recipe(&recipe, None, None).unwrap();
     let text = &rendered.containerfile;
     for used in &recipe.kits {
@@ -531,14 +558,14 @@ fn a_command_line_kit_is_unpinned() {
         json!({"tools": [binary("thing", &["amd64", "arm64"])]}),
     );
     root.recipe("r", base());
-    let recipe = recipes::resolve("r", &["tools".into()]).unwrap();
+    let recipe = recipes::resolve(&dirs(), "r", &["tools".into()], &()).unwrap();
     assert_eq!(recipe.kits[0].pin, None);
 }
 
 // --- kits ------------------------------------------------------------------------------------------
 
 fn kit_err(name: &str) -> String {
-    kits::load(name, None).unwrap_err().message
+    kits::load(&dirs(), name, None).unwrap_err().message
 }
 
 #[test]
@@ -853,7 +880,9 @@ fn a_kit_path_in_a_recipe_is_relative_to_the_recipe() {
     );
     std::fs::write(&path, body.to_string()).unwrap();
     assert_eq!(
-        recipes::resolve(path.to_str().unwrap(), &[]).unwrap().kits[0]
+        recipes::resolve(&dirs(), path.to_str().unwrap(), &[], &())
+            .unwrap()
+            .kits[0]
             .kit
             .name,
         "local"
@@ -864,12 +893,12 @@ fn a_kit_path_in_a_recipe_is_relative_to_the_recipe() {
 fn names_lists_shipped_and_user_entries() {
     let root = Root::new("names");
     root.recipe("mine", base());
-    let found = catalog::names(catalog::Kind::Recipes).unwrap();
+    let found = catalog::names(&dirs(), catalog::Kind::Recipes).unwrap();
     for name in ["claude", "hax", "mine"] {
         assert!(found.iter().any(|n| n == name), "{name}");
     }
     assert!(
-        catalog::names(catalog::Kind::Kits)
+        catalog::names(&dirs(), catalog::Kind::Kits)
             .unwrap()
             .iter()
             .any(|n| n == "docs")

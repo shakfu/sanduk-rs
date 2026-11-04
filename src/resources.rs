@@ -5,13 +5,13 @@
 //! directory, under a hash of their content, and checked against the binary on every use: a file
 //! edited there is written back rather than trusted.
 
-use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use sha2::{Digest, Sha256};
 
 use crate::error::Result;
-use crate::util::cache_dir;
 
 mod embedded {
     include!(concat!(env!("OUT_DIR"), "/resources.rs"));
@@ -19,15 +19,20 @@ mod embedded {
 
 pub use embedded::FILES;
 
-/// The directory holding the shipped `agents/`, `recipes/` and `kits/`.
-pub fn root() -> Result<PathBuf> {
-    static ROOT: OnceLock<std::result::Result<PathBuf, String>> = OnceLock::new();
-    ROOT.get_or_init(|| extract().map_err(|e| e.message))
+/// The directory under `cache` holding the shipped `agents/`, `recipes/` and `kits/`. Extracted
+/// once per cache directory per process.
+pub fn root(cache: &Path) -> Result<PathBuf> {
+    static ROOTS: Mutex<BTreeMap<PathBuf, std::result::Result<PathBuf, String>>> =
+        Mutex::new(BTreeMap::new());
+    let mut roots = ROOTS.lock().unwrap_or_else(PoisonError::into_inner);
+    roots
+        .entry(cache.to_path_buf())
+        .or_insert_with(|| extract(cache).map_err(|e| e.message))
         .clone()
         .map_err(crate::error::Error::new)
 }
 
-fn extract() -> Result<PathBuf> {
+fn extract(cache: &Path) -> Result<PathBuf> {
     let mut hash = Sha256::new();
     for (rel, data) in FILES {
         hash.update(rel.as_bytes());
@@ -35,7 +40,7 @@ fn extract() -> Result<PathBuf> {
         hash.update(Sha256::digest(data));
     }
     let digest = format!("{:x}", hash.finalize());
-    let dir = cache_dir().join("resources").join(&digest[..16]);
+    let dir = cache.join("resources").join(&digest[..16]);
     for (rel, data) in FILES {
         let path = dir.join(rel);
         if std::fs::read(&path).is_ok_and(|on_disk| on_disk == *data) {

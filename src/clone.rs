@@ -12,7 +12,7 @@ use regex::Regex;
 
 use crate::agent::REPORT_NAME;
 use crate::error::{Error, Result};
-use crate::util::{open_unfollowed, state_dir};
+use crate::util::open_unfollowed;
 
 /// Where the return script leaves the bundle, relative to the clone.
 const BUNDLE: &str = ".git/sanduk-return.bundle";
@@ -41,7 +41,7 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_INDEX_FILE")
         .output()
-        .map_err(|e| Error::new(format!("--clone needs git on this host: {e}")))?;
+        .map_err(|e| Error::about("clone_into", format!("needs git on this host: {e}")))?;
     if !out.status.success() {
         return Err(Error::new(format!(
             "git {}: {}",
@@ -54,9 +54,14 @@ fn git(dir: &Path, args: &[&str]) -> Result<String> {
 
 impl Clone {
     /// Checks that `origin` is a repository's top level with no uncommitted change to a tracked
-    /// file, which the clone would not carry. Nothing is created yet.
-    pub fn plan(origin: &Path, run: &str) -> Result<Self> {
-        let refuse = |why: &str| Error::new(format!("--clone: {} {why}", origin.display()));
+    /// file, which the clone would not carry, and that nothing is at `copy`. Nothing is created yet.
+    pub fn plan(origin: &Path, run: &str, copy: PathBuf) -> Result<Self> {
+        let refuse = |why: &str| {
+            Error::about(
+                "clone_into",
+                format!("refuses {}: it {why}", origin.display()),
+            )
+        };
         let top = git(origin, &["rev-parse", "--show-toplevel"])
             .map_err(|_| refuse("is not a git repository"))?;
         if std::fs::canonicalize(&top).ok().as_deref() != Some(origin) {
@@ -71,9 +76,18 @@ impl Clone {
                 "has uncommitted changes, which the clone would not carry. Commit or stash them",
             ));
         }
+        if copy.symlink_metadata().is_ok() {
+            return Err(Error::about(
+                "clone_into",
+                format!(
+                    "{} already exists; the clone needs a path of its own",
+                    copy.display()
+                ),
+            ));
+        }
         Ok(Clone {
             origin: origin.to_path_buf(),
-            copy: state_dir().join("clones").join(run),
+            copy,
             base,
             branch: format!("sanduk/{run}"),
         })
@@ -117,8 +131,9 @@ impl Clone {
     /// Fetches the bundle into `branch`, from a copy this process made, so a symlink the agent
     /// left cannot point the fetch elsewhere. Objects are fsck'd as they arrive.
     pub fn fetch(&self) -> Result<String> {
-        let found = open_unfollowed(&self.copy.join(BUNDLE))
-            .ok_or_else(|| Error::new("the return step wrote no bundle"))?;
+        let found = open_unfollowed(&self.copy.join(BUNDLE)).map_err(|refused| {
+            Error::new(refused.unwrap_or_else(|| "the return step wrote no bundle".into()))
+        })?;
         let held = self.copy.with_extension("bundle");
         let mut out = std::fs::OpenOptions::new()
             .write(true)
@@ -188,17 +203,23 @@ mod tests {
     fn a_dirty_tree_a_subdirectory_and_a_plain_directory_are_refused() {
         let dir = repo("refuse");
         std::fs::write(dir.join("a.txt"), "changed").unwrap();
-        let e = Clone::plan(&dir, "x").err().unwrap();
+        let e = Clone::plan(&dir, "x", dir.with_extension("x"))
+            .err()
+            .unwrap();
         assert!(e.message.contains("uncommitted"), "{}", e.message);
         sh(&dir, "git checkout -q a.txt && mkdir sub");
         // Untracked files are not a refusal: the clone leaves them where they are.
         std::fs::write(dir.join("new.txt"), "x").unwrap();
-        assert!(Clone::plan(&dir, "x").is_ok());
-        let e = Clone::plan(&dir.join("sub"), "x").err().unwrap();
+        assert!(Clone::plan(&dir, "x", dir.with_extension("x")).is_ok());
+        let e = Clone::plan(&dir.join("sub"), "x", dir.with_extension("x"))
+            .err()
+            .unwrap();
         assert!(e.message.contains("top level"), "{}", e.message);
         let plain = dir.with_extension("plain");
         std::fs::create_dir_all(&plain).unwrap();
-        let e = Clone::plan(&plain, "x").err().unwrap();
+        let e = Clone::plan(&plain, "x", dir.with_extension("x"))
+            .err()
+            .unwrap();
         assert!(e.message.contains("not a git repository"), "{}", e.message);
         let _ = std::fs::remove_dir_all(&plain);
         let _ = std::fs::remove_dir_all(&dir);
@@ -210,9 +231,8 @@ mod tests {
     fn the_agents_commits_come_back_as_a_branch_and_its_config_does_not() {
         let dir = repo("roundtrip");
         let state = dir.with_extension("state");
-        crate::util::override_dirs(None, Some(state.clone()));
         {
-            let c = Clone::plan(&dir, "abc123").unwrap();
+            let c = Clone::plan(&dir, "abc123", state.join("abc123")).unwrap();
             c.create().unwrap();
             let marker = dir.with_extension("pwned");
             let agent = format!(
@@ -238,7 +258,6 @@ mod tests {
             c.remove();
             assert!(!c.copy.exists());
         }
-        crate::util::override_dirs(None, None);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&state);
     }
@@ -247,16 +266,14 @@ mod tests {
     fn an_agent_that_changed_nothing_returns_unchanged() {
         let dir = repo("unchanged");
         let state = dir.with_extension("state");
-        crate::util::override_dirs(None, Some(state.clone()));
         {
-            let c = Clone::plan(&dir, "u").unwrap();
+            let c = Clone::plan(&dir, "u", state.join("u")).unwrap();
             c.create().unwrap();
             std::fs::write(c.copy.join(REPORT_NAME), "only a report").unwrap();
             let out = sh(&c.copy, &c.script());
             assert_eq!(out.status.code(), Some(UNCHANGED), "{out:?}");
             c.remove();
         }
-        crate::util::override_dirs(None, None);
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&state);
     }

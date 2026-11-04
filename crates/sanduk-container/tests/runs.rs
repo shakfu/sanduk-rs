@@ -3,8 +3,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use sanduk::runs::{self, claim, owner_alive, reap_with, runs_dir, sweep_with};
-use sanduk::{preflight, util};
+use sanduk_container::runs::{self, Reaper, claim, owner_alive, sweep_with};
 use sanduk_container::{Captured, Engine, Exec, Kind};
 use serde_json::Value;
 
@@ -59,8 +58,17 @@ fn fake(containers: &[&str], reachable: bool) -> Arc<Fake> {
     })
 }
 
-fn engine_of(f: &Arc<Fake>) -> impl Fn(&str) -> sanduk::error::Result<Engine> + '_ {
+fn engine_of(f: &Arc<Fake>) -> impl Fn(&str) -> sanduk_container::Result<Engine> + '_ {
     move |_| Ok(Engine::with_exec(Kind::Docker, f.clone()))
+}
+
+thread_local! {
+    static RUNS: std::cell::RefCell<std::path::PathBuf> = std::cell::RefCell::default();
+}
+
+/// This thread's records directory, which [`State`] sets.
+fn runs_dir() -> std::path::PathBuf {
+    RUNS.with(|r| r.borrow().clone())
 }
 
 /// A scratch state directory for this thread.
@@ -70,14 +78,13 @@ impl State {
     fn new(name: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("sanduk-runs-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        util::override_dirs(None, Some(dir.clone()));
+        RUNS.with(|r| *r.borrow_mut() = dir.join("runs"));
         State(dir)
     }
 }
 
 impl Drop for State {
     fn drop(&mut self) {
-        util::override_dirs(None, None);
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
@@ -96,16 +103,25 @@ fn rewrite(name: &str, key: &str, value: Value) {
     std::fs::write(path, record.to_string()).unwrap();
 }
 
-fn records() -> usize {
+/// Records, and the names files beside them, in this thread's directory.
+fn files(extension: &str) -> usize {
     std::fs::read_dir(runs_dir())
-        .map(|d| d.count())
+        .map(|d| {
+            d.flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == extension))
+                .count()
+        })
         .unwrap_or(0)
+}
+
+fn records() -> usize {
+    files("json")
 }
 
 #[test]
 fn a_record_names_its_owner_and_every_container_it_starts() {
     let _s = State::new("record");
-    let mut run = claim("docker", "sanduk-abcd").unwrap();
+    let mut run = claim(&runs_dir(), "docker", "sanduk-abcd").unwrap();
     run.add("sanduk-hold-ef").unwrap();
     let record: Value =
         serde_json::from_slice(&std::fs::read(runs_dir().join("sanduk-abcd.json")).unwrap())
@@ -122,10 +138,10 @@ fn a_record_names_its_owner_and_every_container_it_starts() {
 fn a_live_owner_is_left_alone() {
     let _s = State::new("live");
     let f = fake(&["sanduk-abcd"], true);
-    claim("docker", "sanduk-abcd").unwrap();
-    assert!(sweep_with(engine_of(&f)).is_empty());
+    claim(&runs_dir(), "docker", "sanduk-abcd").unwrap();
+    assert!(sweep_with(&runs_dir(), engine_of(&f), &|_| {}).is_empty());
     assert!(f.deleted.lock().unwrap().is_empty());
-    assert!(runs::live_containers().contains("sanduk-abcd"));
+    assert!(runs::live_containers(&runs_dir()).contains("sanduk-abcd"));
 }
 
 /// The holder counts. A killed relayed run leaks both.
@@ -133,15 +149,18 @@ fn a_live_owner_is_left_alone() {
 fn a_dead_owners_containers_are_deleted() {
     let _s = State::new("dead");
     let f = fake(&["sanduk-abcd", "sanduk-hold-ef"], true);
-    let mut run = claim("docker", "sanduk-abcd").unwrap();
+    let mut run = claim(&runs_dir(), "docker", "sanduk-abcd").unwrap();
     run.add("sanduk-hold-ef").unwrap();
     rewrite("sanduk-abcd", "pid", dead_pid().into());
-    assert_eq!(sweep_with(engine_of(&f)), ["sanduk-abcd", "sanduk-hold-ef"]);
+    assert_eq!(
+        sweep_with(&runs_dir(), engine_of(&f), &|_| {}),
+        ["sanduk-abcd", "sanduk-hold-ef"]
+    );
     assert_eq!(
         *f.deleted.lock().unwrap(),
         ["sanduk-abcd", "sanduk-hold-ef"]
     );
-    assert_eq!(records(), 0);
+    assert_eq!((records(), files("names")), (0, 0));
 }
 
 /// What --keep does: the container stays, and the next run leaves it.
@@ -149,8 +168,10 @@ fn a_dead_owners_containers_are_deleted() {
 fn a_released_record_is_never_swept() {
     let _s = State::new("released");
     let f = fake(&["sanduk-abcd"], true);
-    claim("docker", "sanduk-abcd").unwrap().release();
-    assert!(sweep_with(engine_of(&f)).is_empty());
+    claim(&runs_dir(), "docker", "sanduk-abcd")
+        .unwrap()
+        .release();
+    assert!(sweep_with(&runs_dir(), engine_of(&f), &|_| {}).is_empty());
     assert!(f.deleted.lock().unwrap().is_empty());
 }
 
@@ -158,9 +179,9 @@ fn a_released_record_is_never_swept() {
 fn a_container_the_engine_no_longer_has_is_not_deleted() {
     let _s = State::new("gone");
     let f = fake(&[], true);
-    claim("docker", "sanduk-abcd").unwrap();
+    claim(&runs_dir(), "docker", "sanduk-abcd").unwrap();
     rewrite("sanduk-abcd", "pid", dead_pid().into());
-    assert!(sweep_with(engine_of(&f)).is_empty());
+    assert!(sweep_with(&runs_dir(), engine_of(&f), &|_| {}).is_empty());
     assert!(f.deleted.lock().unwrap().is_empty());
     assert_eq!(records(), 0);
 }
@@ -171,18 +192,18 @@ fn a_container_the_engine_no_longer_has_is_not_deleted() {
 fn an_unreachable_engine_keeps_the_record() {
     let _s = State::new("unreachable");
     let f = fake(&["sanduk-abcd"], false);
-    claim("docker", "sanduk-abcd").unwrap();
+    claim(&runs_dir(), "docker", "sanduk-abcd").unwrap();
     rewrite("sanduk-abcd", "pid", dead_pid().into());
-    assert!(sweep_with(engine_of(&f)).is_empty());
+    assert!(sweep_with(&runs_dir(), engine_of(&f), &|_| {}).is_empty());
     assert_eq!(records(), 1);
 }
 
 #[test]
 fn a_record_naming_an_unknown_engine_is_left_alone() {
     let _s = State::new("unknown");
-    claim("nosuch", "sanduk-abcd").unwrap();
+    claim(&runs_dir(), "nosuch", "sanduk-abcd").unwrap();
     rewrite("sanduk-abcd", "pid", dead_pid().into());
-    assert!(runs::sweep().is_empty());
+    assert!(runs::sweep(&runs_dir(), &|_| {}).is_empty());
     assert_eq!(records(), 1);
 }
 
@@ -190,107 +211,99 @@ fn a_record_naming_an_unknown_engine_is_left_alone() {
 fn an_unreadable_record_is_dropped() {
     let _s = State::new("unreadable");
     let f = fake(&[], true);
-    claim("docker", "sanduk-abcd").unwrap();
+    claim(&runs_dir(), "docker", "sanduk-abcd").unwrap();
     std::fs::write(runs_dir().join("sanduk-abcd.json"), "{not json").unwrap();
-    assert!(sweep_with(engine_of(&f)).is_empty());
+    assert!(sweep_with(&runs_dir(), engine_of(&f), &|_| {}).is_empty());
     assert_eq!(records(), 0);
 }
 
-/// A reaper knows its run is over, so it does not ask the pid: a killed owner not yet waited for
-/// is a zombie, and a zombie answers as alive.
+/// A stand-in engine CLI for the reaper's shell: `alive` lists the containers it holds, `log`
+/// each call. A name starting `sanduk-stuck` cannot be deleted.
+fn stub_cli(alive: &[&str]) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = runs_dir().parent().unwrap().join("cli");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("alive"),
+        alive.iter().map(|a| format!("{a}\n")).collect::<String>(),
+    )
+    .unwrap();
+    let script = format!(
+        r#"#!/bin/sh
+d={dir}
+echo "$*" >> "$d/log"
+case "$1" in
+  stop) exit 0 ;;
+  inspect) grep -qx "$2" "$d/alive" ;;
+  rm)
+    case "$2" in sanduk-stuck*) exit 1 ;; esac
+    grep -qx "$2" "$d/alive" || exit 1
+    grep -vx "$2" "$d/alive" > "$d/alive.new"; mv "$d/alive.new" "$d/alive" ;;
+esac
+"#,
+        dir = dir.display()
+    );
+    let path = dir.join("docker");
+    std::fs::write(&path, script).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn stub_read(cli: &std::path::Path, file: &str) -> String {
+    std::fs::read_to_string(cli.with_file_name(file)).unwrap_or_default()
+}
+
+/// The reaper is `sh` and the engine's CLI, so it works under any host binary. It knows its run
+/// is over and does not ask the pid: a killed owner not yet waited for answers as alive.
 #[test]
 fn a_reaper_deletes_its_record_s_containers_whoever_owns_them() {
     let _s = State::new("reap");
-    let f = fake(&["sanduk-abcd", "sanduk-hold-ef", "sanduk-other"], true);
-    let mut run = claim("docker", "sanduk-abcd").unwrap();
+    let cli = stub_cli(&["sanduk-abcd", "sanduk-hold-ef", "sanduk-other"]);
+    let mut run = claim(&runs_dir(), "docker", "sanduk-abcd").unwrap();
     run.add("sanduk-hold-ef").unwrap();
     assert_eq!(
-        reap_with(&run.path, engine_of(&f)),
-        ["sanduk-abcd", "sanduk-hold-ef"]
+        std::fs::read_to_string(run.names_path()).unwrap(),
+        "sanduk-abcd\nsanduk-hold-ef\n"
     );
-    assert_eq!(*f.containers.lock().unwrap(), ["sanduk-other"]);
-    assert_eq!(records(), 0);
+    let reaper = Reaper::start_as(&run, cli.to_str().unwrap(), "rm", &|_| {}).unwrap();
+    assert_eq!(
+        stub_read(&cli, "log"),
+        "",
+        "the reaper acted before its run ended"
+    );
+    drop(reaper);
+    assert_eq!(stub_read(&cli, "alive"), "sanduk-other\n");
+    assert_eq!((records(), files("names")), (0, 0));
 }
 
 /// A run that tore down released its record before the reaper woke.
 #[test]
 fn a_reaper_of_a_released_record_deletes_nothing() {
     let _s = State::new("reapreleased");
-    let f = fake(&["sanduk-abcd"], true);
-    let run = claim("docker", "sanduk-abcd").unwrap();
+    let cli = stub_cli(&["sanduk-abcd"]);
+    let run = claim(&runs_dir(), "docker", "sanduk-abcd").unwrap();
+    let reaper = Reaper::start_as(&run, cli.to_str().unwrap(), "rm", &|_| {}).unwrap();
     run.release();
-    assert!(reap_with(&run.path, engine_of(&f)).is_empty());
-    assert!(f.deleted.lock().unwrap().is_empty());
+    drop(reaper);
+    assert_eq!(stub_read(&cli, "log"), "");
+    assert_eq!(files("names"), 0);
+}
+
+/// A delete that failed keeps the record, for the next sweep; one the engine no longer has is
+/// already gone.
+#[test]
+fn a_reaper_keeps_the_record_of_a_container_it_could_not_delete() {
+    let _s = State::new("reapstuck");
+    let cli = stub_cli(&["sanduk-stuck-1"]);
+    let mut run = claim(&runs_dir(), "docker", "sanduk-gone").unwrap();
+    run.add("sanduk-stuck-1").unwrap();
+    drop(Reaper::start_as(&run, cli.to_str().unwrap(), "rm", &|_| {}).unwrap());
+    assert_eq!(stub_read(&cli, "alive"), "sanduk-stuck-1\n");
+    assert_eq!((records(), files("names")), (1, 1));
 }
 
 #[test]
 fn sweeping_an_empty_state_directory_is_not_an_error() {
     let _s = State::new("empty");
-    assert!(sweep_with(engine_of(&fake(&[], true))).is_empty());
-}
-
-// --- the key check --------------------------------------------------------------------------------
-
-/// Answers every request with `status`, once per connection.
-fn answering(status: u16) -> String {
-    use std::io::{Read, Write};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap().to_string();
-    std::thread::spawn(move || {
-        for mut stream in listener.incoming().flatten() {
-            let mut buf = [0; 4096];
-            let _ = stream.read(&mut buf);
-            let _ = write!(
-                stream,
-                "HTTP/1.1 {status} X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            );
-        }
-    });
-    addr
-}
-
-use sanduk::providers::{ANTHROPIC_PROVIDER, OPENAI_COMPAT_PROVIDER, Scheme};
-
-/// A bad key fails here in milliseconds, not after minutes of in-container retries.
-#[test]
-fn a_rejected_key_stops_the_run_and_other_statuses_do_not() {
-    let addr = answering(401);
-    let refused = preflight::validate_key("sk-bad", Scheme::Http, &addr, "", &ANTHROPIC_PROVIDER)
-        .unwrap_err();
-    assert!(
-        refused.message.contains("ANTHROPIC_API_KEY rejected") && refused.message.contains("401"),
-        "{}",
-        refused.message
-    );
-    // A 500 proves the endpoint answered; the agent is left to try.
-    preflight::validate_key("sk", Scheme::Http, &answering(500), "", &ANTHROPIC_PROVIDER).unwrap();
-}
-
-#[test]
-fn an_unreachable_endpoint_is_named() {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let refused = preflight::validate_key(
-        "sk",
-        Scheme::Http,
-        &format!("127.0.0.1:{port}"),
-        "",
-        &ANTHROPIC_PROVIDER,
-    )
-    .unwrap_err();
-    assert!(
-        refused
-            .message
-            .starts_with("cannot reach http://127.0.0.1:"),
-        "{}",
-        refused.message
-    );
-}
-
-#[test]
-fn a_keyless_provider_is_not_checked() {
-    preflight::validate_key("", Scheme::Http, "127.0.0.1:1", "", &OPENAI_COMPAT_PROVIDER).unwrap();
+    assert!(sweep_with(&runs_dir(), engine_of(&fake(&[], true)), &|_| {}).is_empty());
 }

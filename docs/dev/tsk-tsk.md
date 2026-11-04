@@ -102,7 +102,7 @@ tsk's equivalent: `scripts/network-isolation-test.sh`.
 
 ### 3. One network per run
 
-**Problem.** Every concurrent sealed run shares `sanduk-net`; key-safe runs share `sanduk-open` (`src/cli/run.rs:62`, `:68`). A container can open connections to another run's containers. Per-run tokens stop it using another run's relay. Nothing stops it reaching the other container directly. Agent containers listen on nothing by default, so the exposure is small unless an agent starts a server.
+**Problem.** Every concurrent sealed run shares `sanduk-net`; key-safe runs share `sanduk-open` (`Mode::network` in `src/run.rs`). A container can open connections to another run's containers. Per-run tokens stop it using another run's relay. Nothing stops it reaching the other container directly. Agent containers listen on nothing by default, so the exposure is small unless an agent starts a server.
 
 **Design.** Name the network `sanduk-net-<run-id>`. Add it to the run record and delete it after the containers. The sweep then reaps it with them. Per-run networks also remove the create race that `ensure_network` handles (`crates/sanduk-container/src/lib.rs:624`). `hold_network_up` already starts one holder per run.
 

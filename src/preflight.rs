@@ -45,9 +45,9 @@ pub fn wildcard_listeners(table: &str) -> Vec<u16> {
         .collect()
 }
 
-/// Warns that a sealed container reaches host services bound to every address, at `gateway`.
-/// Measured on Linux Docker (docs/dev/tsk-tsk.md); elsewhere `/proc` is absent and this is silent.
-pub fn host_listener_warning(gateway: &str) {
+/// A warning that a sealed container reaches host services bound to every address, at `gateway`.
+/// Measured on Linux Docker (docs/dev/tsk-tsk.md); elsewhere `/proc` is absent and this is `None`.
+pub fn host_listener_warning(gateway: &str) -> Option<String> {
     let mut ports: Vec<u16> = ["/proc/net/tcp", "/proc/net/tcp6"]
         .iter()
         .filter_map(|p| std::fs::read_to_string(p).ok())
@@ -56,22 +56,22 @@ pub fn host_listener_warning(gateway: &str) {
     ports.sort_unstable();
     ports.dedup();
     if ports.is_empty() {
-        return;
+        return None;
     }
     let list: Vec<String> = ports.iter().map(u16::to_string).collect();
-    eprintln!(
-        "sanduk: WARNING host TCP ports {} listen on every address.\n  \
+    Some(format!(
+        "WARNING host TCP ports {} listen on every address.\n  \
          The sealed container reaches them at {gateway}, past the relay. \
          Bind them to 127.0.0.1 to keep them out of its reach.",
         list.join(", ")
-    );
+    ))
 }
 
-/// Warns when the macOS application firewall blocks this binary. A blocked binary drops
+/// A warning when the macOS application firewall blocks this binary. A blocked binary drops
 /// container-to-host connections with no error, so the agent's first call to the relay hangs.
-pub fn firewall_warning() {
+pub fn firewall_warning() -> Option<String> {
     if !std::path::Path::new(FIREWALL).exists() {
-        return;
+        return None;
     }
     let run = |arg: &str| {
         std::process::Command::new(FIREWALL)
@@ -82,25 +82,21 @@ pub fn firewall_warning() {
             .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
     };
     if !run("--getglobalstate").is_some_and(|s| s.to_lowercase().contains("enabled")) {
-        return;
+        return None;
     }
-    let Ok(exe) = std::env::current_exe() else {
-        return;
-    };
+    let exe = std::env::current_exe().ok()?;
     let real = std::fs::canonicalize(&exe).unwrap_or(exe.clone());
     let names = [exe.display().to_string(), real.display().to_string()];
     let listing = run("--listapps").unwrap_or_default();
     // An unlisted signed binary is allowed; an unsigned one is prompted for, which nobody answers.
-    if let Some((blocked, _)) = firewall_entries(&listing)
+    let (blocked, _) = firewall_entries(&listing)
         .into_iter()
-        .find(|(p, b)| *b && names.contains(p))
-    {
-        eprintln!(
-            "sanduk: WARNING the macOS firewall is on and\n  {blocked}\n  is set to block incoming connections.\n  \
-             The agent's calls to the relay will hang until --timeout. Allow it once:\n    \
+        .find(|(p, b)| *b && names.contains(p))?;
+    Some(format!(
+        "WARNING the macOS firewall is on and\n  {blocked}\n  is set to block incoming connections.\n  \
+             The agent's calls to the relay will hang until the timeout. Allow it once:\n    \
              sudo {FIREWALL} --unblockapp {blocked}"
-        );
-    }
+    ))
 }
 
 /// One cheap request, so a bad key fails in 0.2s instead of minutes of retries. `path_prefix` is

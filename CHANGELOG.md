@@ -4,7 +4,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `sanduk` is a library; the binary is `sanduk-cli` (`cargo install sanduk-cli`). A run is `Sanduk::plan`, `Plan::start`, the caller's own process from `Live::command`, then `Live::finish`, which returns an `Outcome`. The caller owns the process, so pma keeps its watchdog, log and kill path; a blocking `run()` would have needed its own timeout and cancellation. `clone_into` takes the clone's path from the caller. Errors carry an `ErrorKind`, and name no CLI flag: one about a single option names it in `Error::option` as its `Options` field, and the CLI prints the flag. `Error::detail` holds the facts of an error a caller can fix in its own terms: `Detail::AgentUid`, from which the CLI prints the `sanduk build` command. Image builds stream to the observer as `Note::Build`, as `--verify` output does as `Note::Output`; `sanduk build` and `run` print both to stderr, so the engine's terminal progress display is gone.
+
+  Nothing in the library is process-wide: directories are a `Dirs` value, notes go to an `Observer`, and signals are the CLI's. `serde_json/preserve_order` and `toml/preserve_order` are gone. Cargo unified them into every crate linking sanduk, and pma's export round-trip broke on the key order. The relay rewrites a body from `RawValue`s, so untouched values go upstream byte for byte. Recipe and agent `env` keep their file's order, which image tags hash. `runs` moved to `sanduk-container`. Deviations from the plan are recorded in [docs/dev/refactor-as-library.md](docs/dev/refactor-as-library.md).
+
 ### Added
+
+- `sanduk_container::testing::Fake`, behind the `test-util` feature: a Docker engine with no daemon. `Sanduk::engine` takes it, so a caller can test `plan`, `start` and `finish` without Docker.
 
 - `run --verify CMD` runs CMD with `sh -c` after the agent finishes, in a second container with the same image, mounts and network, no credential, and the rest of `--timeout`. Its status goes to `--stats-file`, not the exit status: one status cannot tell a failed edit from a failed test. With no task, `run --verify` runs only the check, so a base tree is checked in the container a run with the same flags would use. A mode of `run` over a separate verb: the environment is identical by construction.
 
@@ -27,7 +35,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
-- A killed `run` has its containers deleted when it dies, not when the next `run` starts. SIGKILL runs no teardown, and the engine's CLI runs in its own process group, so the agent's container kept running with the worktree mounted until some later run's sweep. A caller that kills sanduk's process group, as pma does at its deadline, left it running every time. Each run now starts `sanduk reap` in its own process group, blocked on a pipe the run holds; the pipe closing, at teardown or at death, starts the delete. A detached reaper over a container-side watchdog: the engine's CLI and the image stay unchanged, and every engine gets it.
+- A killed `run` has its containers deleted when it dies, not when the next `run` starts. SIGKILL runs no teardown, and the engine's CLI runs in its own process group, so the agent's container kept running with the worktree mounted until some later run's sweep. A caller that kills sanduk's process group, as pma does at its deadline, left it running every time. Each run now starts a reaper in its own process group, blocked on a pipe the run holds; the pipe closing, at teardown or at death, starts the delete. The reaper is `sh` and the engine's CLI, reading a names file beside the run record, so it works under any host binary. A detached reaper over a container-side watchdog: the engine's CLI and the image stay unchanged, and every engine gets it.
 
 ## [0.1.0]
 
