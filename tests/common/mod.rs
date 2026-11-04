@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use sanduk::providers::{Provider, Scheme};
-use sanduk::relay::{Config, Relay};
+use sanduk_core::providers::{Provider, Scheme};
+use sanduk_core::relay::{Config, Relay};
 use serde_json::Value;
 
 pub const REAL_KEY: &str = "sk-ant-api03-REAL-KEY-STAYS-ON-HOST";

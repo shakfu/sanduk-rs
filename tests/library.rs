@@ -7,12 +7,12 @@ use std::process::{Command, Output};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use sanduk::Sanduk;
-use sanduk::error::{Detail, ErrorKind};
-use sanduk::observe::{Note, Observer};
-use sanduk::run::{Ended, Mode, Options, Returned};
-use sanduk::util::Dirs;
 use sanduk_container::testing::Fake;
+use sanduk_core::Sanduk;
+use sanduk_core::error::{Detail, ErrorKind};
+use sanduk_core::observe::{Note, Observer};
+use sanduk_core::run::{Ended, Mode, Options, Returned};
+use sanduk_core::util::Dirs;
 
 /// Every note, in order.
 #[derive(Default)]
@@ -87,7 +87,7 @@ impl World {
             cache: Dirs::default().cache,
             ..Dirs::under(&self.root)
         })
-        .engine(self.fake.engine(sanduk::prefix()))
+        .engine(self.fake.engine(sanduk_core::prefix()))
         .observer(self.notes.clone())
     }
 
@@ -99,7 +99,7 @@ impl World {
         Options {
             task: Some("do the task".into()),
             workdir: self.work(),
-            image: sanduk::run::ImageSpec {
+            image: sanduk_core::run::ImageSpec {
                 agent: Some("pi".into()),
                 ..Default::default()
             },
@@ -377,7 +377,7 @@ fn the_check_runs_only_after_an_agent_that_finished() {
 #[test]
 fn the_fakes_reaper_reaches_no_engine_on_the_host() {
     let w = World::new("reapercli");
-    assert_eq!(w.fake.engine(sanduk::prefix()).reaper_cli(), "false");
+    assert_eq!(w.fake.engine(sanduk_core::prefix()).reaper_cli(), "false");
 }
 
 /// An image built for another uid is refused with its facts, so a caller can offer its own fix.

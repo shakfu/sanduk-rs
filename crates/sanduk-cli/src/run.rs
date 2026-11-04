@@ -1,5 +1,5 @@
 //! `sanduk run`: the flags, the agent's process and its stream, the report and the stats file.
-//! Everything around the agent's process is [`sanduk::run`].
+//! Everything around the agent's process is [`sanduk_core::run`].
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
@@ -10,11 +10,11 @@ use regex::Regex;
 
 use crate::launch::{Signals, launch};
 use crate::{EngineArgs, ImageArgs, Stderr, note};
-use sanduk::agent::{Outcome, REPORT_NAME};
-use sanduk::error::{Detail, Error, ErrorKind, Result};
-use sanduk::providers::DEFAULT_PROVIDER;
-use sanduk::run::{Ended, Mode, Options, Returned, Verified, resolve_path};
-use sanduk::util::{Dirs, copy_unfollowed, random_hex, seconds};
+use sanduk_core::agent::{Outcome, REPORT_NAME};
+use sanduk_core::error::{Detail, Error, ErrorKind, Result};
+use sanduk_core::providers::DEFAULT_PROVIDER;
+use sanduk_core::run::{Ended, Mode, Options, Returned, Verified, resolve_path};
+use sanduk_core::util::{Dirs, copy_unfollowed, random_hex, seconds};
 
 #[derive(Args, Debug)]
 #[command(
@@ -315,7 +315,7 @@ pub fn run(dirs: &Dirs, mut args: RunArgs) -> Result<i32> {
     // Chosen here: the clone's path is named by it.
     let id = random_hex(8)?;
     let opts = args.options(dirs, &id)?;
-    let sanduk = sanduk::Sanduk::new(dirs.clone()).observer(Arc::new(Stderr));
+    let sanduk = sanduk_core::Sanduk::new(dirs.clone()).observer(Arc::new(Stderr));
     let plan = sanduk.plan(opts)?;
     if args.dry_run {
         println!("{}", plan.describe()?);
@@ -443,7 +443,7 @@ fn verified_json(v: &Verified) -> serde_json::Value {
 /// The stats file's fields beyond the agent's own.
 fn extra(
     mode: Mode,
-    relay: Option<sanduk::relay::Stats>,
+    relay: Option<sanduk_core::relay::Stats>,
     verified: Option<&Verified>,
 ) -> serde_json::Value {
     serde_json::json!({

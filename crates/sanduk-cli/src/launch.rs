@@ -1,5 +1,5 @@
 //! Running the agent: stream its output through a reader, under a timeout and the signals that
-//! should end it. The CLI's: a library caller starts [`Live::command`](sanduk::run::Live::command)
+//! should end it. The CLI's: a library caller starts [`Live::command`](sanduk_core::run::Live::command)
 //! its own way.
 
 use std::io::{BufRead, BufReader, Write};
@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use sanduk::agent::{Agent, Outcome};
-use sanduk::error::{Error, Result};
+use sanduk_core::agent::{Agent, Outcome};
+use sanduk_core::error::{Error, Result};
 
 static CAUGHT: AtomicI32 = AtomicI32::new(0);
 

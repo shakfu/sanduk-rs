@@ -12,7 +12,7 @@ repository = "https://github.com/shakfu/sanduk-rs"
 homepage = "https://github.com/shakfu/sanduk-rs"
 
 [package]
-name = "sanduk"
+name = "sanduk-core"
 description = "Run a coding agent in a disposable container, with the API key held on the host"
 version.workspace = true
 edition.workspace = true

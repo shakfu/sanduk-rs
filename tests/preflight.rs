@@ -1,6 +1,6 @@
 //! The key check: one cheap request before anything starts.
 
-use sanduk::preflight;
+use sanduk_core::preflight;
 
 /// Answers every request with `status`, once per connection.
 fn answering(status: u16) -> String {
@@ -20,7 +20,7 @@ fn answering(status: u16) -> String {
     addr
 }
 
-use sanduk::providers::{ANTHROPIC_PROVIDER, OPENAI_COMPAT_PROVIDER, Scheme};
+use sanduk_core::providers::{ANTHROPIC_PROVIDER, OPENAI_COMPAT_PROVIDER, Scheme};
 
 /// A bad key fails here in milliseconds, not after minutes of in-container retries.
 #[test]

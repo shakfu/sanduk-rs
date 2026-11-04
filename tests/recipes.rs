@@ -5,9 +5,9 @@
 
 use std::path::{Path, PathBuf};
 
-use sanduk::recipes::{self, Recipe};
-use sanduk::util::Dirs;
-use sanduk::{catalog, kits};
+use sanduk_core::recipes::{self, Recipe};
+use sanduk_core::util::Dirs;
+use sanduk_core::{catalog, kits};
 
 thread_local! {
     /// The directories this thread's test points at. The library takes them as a value; a test

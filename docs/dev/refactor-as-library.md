@@ -169,6 +169,8 @@ A `cli` feature on `sanduk`, default on and with `required-features` on the bina
 
 The cost of a separate crate is the install command: `cargo install sanduk-cli`. The README and pma's docs name it once each.
 
+2026-11-05: renamed before publishing. The library is `sanduk-core` and the binary's package is `sanduk`, in `crates/sanduk-cli/`. pma runs the binary and links no library, so the install command mattered more than the library's name. `sanduk` 0.1.0 was a CLI, and `cargo install sanduk` now upgrades it. The two reasons above still hold: no feature is involved.
+
 ## Changes, in order
 
 Each step leaves the CLI's tests passing and its output unchanged.

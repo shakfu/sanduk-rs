@@ -19,12 +19,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
 use crate::note;
-use sanduk::agent::DEFAULT_AGENT;
-use sanduk::catalog::is_path;
-use sanduk::error::{Error, Result};
-use sanduk::providers::DEFAULT_PROVIDER;
-use sanduk::util::{Dirs, read_unfollowed, seconds};
 use sanduk_container::runs::owner_alive;
+use sanduk_core::agent::DEFAULT_AGENT;
+use sanduk_core::catalog::is_path;
+use sanduk_core::error::{Error, Result};
+use sanduk_core::providers::DEFAULT_PROVIDER;
+use sanduk_core::util::{Dirs, read_unfollowed, seconds};
 
 pub const CONFIG_NAME: &str = "assistant.toml";
 const DEFAULT_EVERY: &str = "30m";

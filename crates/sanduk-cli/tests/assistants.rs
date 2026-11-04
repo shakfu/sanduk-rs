@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use rusqlite::Connection;
-use sanduk::util::Dirs;
-use sanduk_cli::assistants::{self as a, Assistant};
+use sanduk::assistants::{self as a, Assistant};
+use sanduk_core::util::Dirs;
 
 thread_local! {
     /// The directories this thread's test points at. The library takes them as a value; a test

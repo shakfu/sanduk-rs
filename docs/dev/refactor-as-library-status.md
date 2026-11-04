@@ -56,8 +56,8 @@ Linux paths macOS did not exercise:
 ## Next
 
 1. Check the macOS CI job. It has not run since the refactor: both runs were cancelled in the queue.
-2. pma copied the library as `pma-box` instead of calling it. sanduk-rs now keeps `sanduk-sandbox` and `sanduk-container` stable for other programs: [shared-core.md](shared-core.md).
-3. Decide on publishing `sanduk-container`.
+2. pma copied the library as `pma-box`, then reverted on 2026-11-05: it runs the `sanduk` binary again ([shared-core.md](shared-core.md)). The API from pma stays unverified.
+3. Publish `sanduk-container`, `sanduk-core` and `sanduk` 0.2.0, in that order, so `cargo install sanduk` gives pma's worker the reaper fix and `--clone`.
 
 ## Known gaps
 

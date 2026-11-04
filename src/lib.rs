@@ -1,9 +1,9 @@
 //! sanduk: run a coding agent in a disposable container, with the API key held on the host.
 //!
 //! ```no_run
-//! use sanduk::run::{Mode, Options};
-//! # fn main() -> sanduk::error::Result<()> {
-//! let sanduk = sanduk::Sanduk::new(sanduk::util::Dirs::default());
+//! use sanduk_core::run::{Mode, Options};
+//! # fn main() -> sanduk_core::error::Result<()> {
+//! let sanduk = sanduk_core::Sanduk::new(sanduk_core::util::Dirs::default());
 //! let plan = sanduk.plan(Options {
 //!     task: Some("Summarise this repository.".into()),
 //!     workdir: "./repo".into(),

@@ -9,18 +9,17 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
 
-use sanduk::CONTAINER_PREFIX;
-use sanduk_container::{Container, Engine, Kind, default_kind};
-
-use sanduk::agent;
-use sanduk::catalog;
-use sanduk::error::{Error, Result};
-use sanduk::kits;
-use sanduk::observe::{Note, Observer};
-use sanduk::providers::PROVIDERS;
-use sanduk::recipes;
-use sanduk::util::Dirs;
 use sanduk_container::runs::live_containers;
+use sanduk_container::{Container, Engine, Kind, default_kind};
+use sanduk_core::CONTAINER_PREFIX;
+use sanduk_core::agent;
+use sanduk_core::catalog;
+use sanduk_core::error::{Error, Result};
+use sanduk_core::kits;
+use sanduk_core::observe::{Note, Observer};
+use sanduk_core::providers::PROVIDERS;
+use sanduk_core::recipes;
+use sanduk_core::util::Dirs;
 
 pub use run::{RunArgs, agent_stats};
 
@@ -86,8 +85,8 @@ pub struct EngineArgs {
 }
 
 impl ImageArgs {
-    pub fn spec(&self) -> sanduk::run::ImageSpec {
-        sanduk::run::ImageSpec {
+    pub fn spec(&self) -> sanduk_core::run::ImageSpec {
+        sanduk_core::run::ImageSpec {
             agent: self.agent.clone(),
             recipe: self.recipe.clone(),
             kits: self.kit.clone(),
@@ -99,7 +98,7 @@ impl ImageArgs {
 
 impl EngineArgs {
     pub fn engine(&self) -> Result<Engine> {
-        Ok(Engine::get(self.runtime.as_deref(), sanduk::prefix())?)
+        Ok(Engine::get(self.runtime.as_deref(), sanduk_core::prefix())?)
     }
 }
 
@@ -296,7 +295,7 @@ pub fn main(argv: Vec<OsString>) -> i32 {
         // The first argument used to be the task, so this is the mistake to expect.
         eprintln!(
             "sanduk: {first:?} is not a command. Did you mean: sanduk run {}\ncommands: {}",
-            sanduk::util::shell_quote(first),
+            sanduk_core::util::shell_quote(first),
             verbs.join(", ")
         );
         return 2;
@@ -354,7 +353,7 @@ pub fn main(argv: Vec<OsString>) -> i32 {
     }
 }
 
-/// The flag that sets a [`sanduk::run::Options`] field.
+/// The flag that sets a [`sanduk_core::run::Options`] field.
 fn flag(option: &str) -> String {
     let field = option.strip_prefix("image.").unwrap_or(option);
     match field {
@@ -378,7 +377,7 @@ pub fn message(e: &Error) -> String {
 
 fn build(dirs: &Dirs, args: BuildArgs) -> Result<i32> {
     let engine = args.engine.engine()?;
-    let (_, image) = sanduk::run::resolve_image(dirs, &args.image.spec(), &engine, &Stderr)?;
+    let (_, image) = sanduk_core::run::resolve_image(dirs, &args.image.spec(), &engine, &Stderr)?;
     if args.dry_run {
         print_build(&image)?;
         return Ok(0);
@@ -391,12 +390,12 @@ fn build(dirs: &Dirs, args: BuildArgs) -> Result<i32> {
         ));
         return Ok(0);
     }
-    sanduk::run::build_image(&engine, &image, &Stderr)?;
+    sanduk_core::run::build_image(&engine, &image, &Stderr)?;
     Ok(0)
 }
 
 /// What `build` would do: the resolved recipe, then the Containerfile.
-fn print_build(image: &sanduk::run::Image) -> Result<()> {
+fn print_build(image: &sanduk_core::run::Image) -> Result<()> {
     println!("# image: {}", image.tag);
     match (&image.recipe, &image.rendered) {
         (Some(recipe), Some(rendered)) => {
@@ -425,7 +424,7 @@ fn print_build(image: &sanduk::run::Image) -> Result<()> {
 
 fn shell(dirs: &Dirs, args: ShellArgs) -> Result<i32> {
     let engine = args.engine.engine()?;
-    let (_, image) = sanduk::run::resolve_image(dirs, &args.image.spec(), &engine, &Stderr)?;
+    let (_, image) = sanduk_core::run::resolve_image(dirs, &args.image.spec(), &engine, &Stderr)?;
     engine.require()?;
     if !engine.image_exists(&image.tag) {
         return Err(Error::new(format!(
@@ -515,7 +514,7 @@ fn clean(dirs: &Dirs, args: &EngineArgs, all: bool) -> Result<i32> {
 /// would undo the point.
 fn destroy(dirs: &Dirs, args: DestroyArgs) -> Result<i32> {
     let engine = args.engine.engine()?;
-    let (_, image) = sanduk::run::resolve_image(dirs, &args.image.spec(), &engine, &Stderr)?;
+    let (_, image) = sanduk_core::run::resolve_image(dirs, &args.image.spec(), &engine, &Stderr)?;
     clean(dirs, &args.engine, false)?;
     match &image.recipe {
         Some(recipe) if args.image.image.is_none() => {
@@ -530,7 +529,7 @@ fn destroy(dirs: &Dirs, args: DestroyArgs) -> Result<i32> {
         }
         _ => deleted(engine.delete_image(&image.tag), "image", &image.tag),
     }
-    for network in sanduk::run::mode_networks(args.proxy_network.as_deref()) {
+    for network in sanduk_core::run::mode_networks(args.proxy_network.as_deref()) {
         deleted(engine.delete_network(&network), "network", &network);
     }
     Ok(0)
@@ -793,7 +792,7 @@ fn runs(dirs: &Dirs, args: RunsArgs) -> Result<i32> {
 }
 
 /// The flags that chose this image, for a command the user is told to run.
-fn selectors(spec: &sanduk::run::ImageSpec) -> String {
+fn selectors(spec: &sanduk_core::run::ImageSpec) -> String {
     let mut parts: Vec<String> = spec
         .recipe
         .iter()
@@ -804,7 +803,7 @@ fn selectors(spec: &sanduk::run::ImageSpec) -> String {
             "--agent {}",
             spec.agent
                 .as_deref()
-                .unwrap_or(sanduk::agent::DEFAULT_AGENT)
+                .unwrap_or(sanduk_core::agent::DEFAULT_AGENT)
         ));
     }
     parts.extend(spec.kits.iter().map(|k| format!("--kit {k}")));

@@ -724,6 +724,28 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 name = "sanduk"
 version = "0.2.0"
 dependencies = [
+ "clap",
+ "libc",
+ "regex",
+ "rusqlite",
+ "sanduk-container",
+ "sanduk-core",
+ "serde_json",
+ "toml",
+]
+
+[[package]]
+name = "sanduk-container"
+version = "0.2.0"
+dependencies = [
+ "libc",
+ "serde_json",
+]
+
+[[package]]
+name = "sanduk-core"
+version = "0.2.0"
+dependencies = [
  "bytes",
  "flate2",
  "http-body-util",
@@ -740,28 +762,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml",
-]
-
-[[package]]
-name = "sanduk-cli"
-version = "0.2.0"
-dependencies = [
- "clap",
- "libc",
- "regex",
- "rusqlite",
- "sanduk",
- "sanduk-container",
- "serde_json",
- "toml",
-]
-
-[[package]]
-name = "sanduk-container"
-version = "0.2.0"
-dependencies = [
- "libc",
- "serde_json",
 ]
 
 [[package]]

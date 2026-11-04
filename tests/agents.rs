@@ -3,10 +3,10 @@
 
 use std::path::Path;
 
-use sanduk::agent::{self, Endpoint, Options, stream};
-use sanduk::providers::{Scheme, get_provider};
-use sanduk::recipes;
-use sanduk::util::Dirs;
+use sanduk_core::agent::{self, Endpoint, Options, stream};
+use sanduk_core::providers::{Scheme, get_provider};
+use sanduk_core::recipes;
+use sanduk_core::util::Dirs;
 
 /// The shipped catalogue, and an empty user one.
 fn dirs() -> Dirs {
@@ -304,7 +304,7 @@ fn a_user_agent_cannot_take_a_shipped_name() {
 
 // --- behaviour Python got wrong, and messages ---------------------------------------------------
 
-fn at_relay(provider: &'static sanduk::providers::Provider) -> Endpoint<'static> {
+fn at_relay(provider: &'static sanduk_core::providers::Provider) -> Endpoint<'static> {
     Endpoint {
         provider,
         scheme: provider.scheme,

@@ -1,7 +1,7 @@
 //! Against the real endpoint, over TLS. Ignored by default: it needs the network.
 //!
 //! ```text
-//! cargo test -p sanduk --test live_tls -- --ignored
+//! cargo test -p sanduk-core --test live_tls -- --ignored
 //! ```
 //!
 //! No API call is billed: the key is invalid, and the 401 the provider answers with is itself
@@ -10,8 +10,8 @@
 mod common;
 
 use common::*;
-use sanduk::providers::ANTHROPIC_PROVIDER;
-use sanduk::relay::{Config, Relay};
+use sanduk_core::providers::ANTHROPIC_PROVIDER;
+use sanduk_core::relay::{Config, Relay};
 
 #[test]
 #[ignore]

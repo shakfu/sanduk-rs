@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use common::*;
-use sanduk::providers::{
+use sanduk_core::providers::{
     ANTHROPIC_PROVIDER, OPENAI_COMPAT_PROVIDER, OPENROUTER_PROVIDER, PROVIDERS, Provider,
 };
 use serde_json::{Value, json};
@@ -529,8 +529,8 @@ fn chat(model: &str, cap: Option<u64>) -> Vec<u8> {
 fn compat(
     up: &Upstream,
     api_key: &str,
-    tweak: impl FnOnce(sanduk::relay::Config) -> sanduk::relay::Config,
-) -> (sanduk::relay::Relay, Notes) {
+    tweak: impl FnOnce(sanduk_core::relay::Config) -> sanduk_core::relay::Config,
+) -> (sanduk_core::relay::Relay, Notes) {
     let key = api_key.to_string();
     relay(COMPAT, up, move |mut c| {
         c.api_key = key;
@@ -541,7 +541,7 @@ fn compat(
 /// The provider's own scheme is http, so the relay reaches a local server without TLS.
 #[test]
 fn openai_compat_is_reached_over_plaintext_by_default() {
-    assert_eq!(COMPAT.scheme, sanduk::providers::Scheme::Http);
+    assert_eq!(COMPAT.scheme, sanduk_core::providers::Scheme::Http);
     let up = openai_usage();
     let (relay, _) = compat(&up, "", |c| c);
     assert_eq!(
@@ -865,11 +865,11 @@ fn an_unreachable_upstream_is_a_502() {
         .port();
     let notes: Notes = Arc::default();
     let captured = notes.clone();
-    let mut cfg = sanduk::relay::Config::new(A, REAL_KEY, TOKEN);
+    let mut cfg = sanduk_core::relay::Config::new(A, REAL_KEY, TOKEN);
     cfg.upstream = format!("127.0.0.1:{port}");
-    cfg.scheme = sanduk::providers::Scheme::Http;
+    cfg.scheme = sanduk_core::providers::Scheme::Http;
     cfg.note = Arc::new(move |m| captured.lock().unwrap().push(m.to_string()));
-    let relay = sanduk::relay::Relay::start(cfg, "127.0.0.1", 0).unwrap();
+    let relay = sanduk_core::relay::Relay::start(cfg, "127.0.0.1", 0).unwrap();
     assert_eq!(call(relay.port(), A, "/v1/models", TOKEN, None).status, 502);
     assert!(
         notes
@@ -915,7 +915,7 @@ fn costing(cost: Option<f64>, dwell: Duration) -> Upstream {
     })
 }
 
-fn budgeted(up: &Upstream, budget: Option<f64>) -> sanduk::relay::Relay {
+fn budgeted(up: &Upstream, budget: Option<f64>) -> sanduk_core::relay::Relay {
     relay(OR, up, move |mut c| {
         c.budget = budget;
         c
@@ -1119,14 +1119,14 @@ fn the_ping_answers_without_a_token_and_is_not_counted() {
     let up = ok();
     let (relay, notes) = relay(A, &up, |c| c);
     let mut conn = Conn::open(relay.port());
-    conn.send("GET", sanduk::relay::PING, &[], None);
+    conn.send("GET", sanduk_core::relay::PING, &[], None);
     let reply = conn.read_reply();
     assert_eq!(reply.status, 204);
     assert!(reply.body.is_empty());
-    assert_eq!(relay.stats(), sanduk::relay::Stats::default());
+    assert_eq!(relay.stats(), sanduk_core::relay::Stats::default());
     assert!(notes.lock().unwrap().is_empty());
     assert_eq!(up.calls(), 0);
     // Only a GET: anything else there is an ordinary request, refused without the token.
-    let refused = call_with(relay.port(), sanduk::relay::PING, &[], Some(b"{}"));
+    let refused = call_with(relay.port(), sanduk_core::relay::PING, &[], Some(b"{}"));
     assert_eq!(refused.status, 401);
 }

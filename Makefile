@@ -12,7 +12,7 @@ test:
 # default, and relays one unbilled call to api.anthropic.com over TLS.
 live:
 	cargo test -p sanduk-container --test live -- --ignored --test-threads 1
-	cargo test -p sanduk --test live_tls -- --ignored
+	cargo test -p sanduk-core --test live_tls -- --ignored
 
 # Matches what CI runs. `make fmt` applies what `lint` only reports.
 lint:
