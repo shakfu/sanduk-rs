@@ -1124,3 +1124,151 @@ fn a_run_whose_container_cannot_reach_the_relay_stops_before_the_agent() {
     assert_eq!(w.containers(), "");
     assert_eq!(w.records(), 0);
 }
+
+// --- --clone ----------------------------------------------------------------------------------------
+
+/// `git` in `dir`, which must succeed; its stdout.
+fn git(dir: &Path, script: &str) -> String {
+    let out = Command::new("sh")
+        .args([
+            "-c",
+            &format!("git -c user.name=t -c user.email=t@t {script}"),
+        ])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {script}: {out:?}");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The workdir as a repository with one commit.
+fn repo(w: &World) -> PathBuf {
+    let work = w.path("work");
+    git(&work, "init -q");
+    std::fs::write(work.join("a.txt"), "a\n").unwrap();
+    git(&work, "add a.txt");
+    git(&work, "commit -qm base");
+    work
+}
+
+fn clones(w: &World) -> usize {
+    std::fs::read_dir(w.path("state/sanduk/clones"))
+        .map(|d| d.count())
+        .unwrap_or(0)
+}
+
+/// The agent commits, leaves an edit, writes its report and a `core.fsmonitor` into the clone's
+/// config. The repository gets a branch with both changes; its own tree and config are untouched.
+#[test]
+fn clone_returns_the_agents_work_as_a_branch_and_nothing_else() {
+    let w = World::new("clone");
+    let work = repo(&w);
+    let marker = w.path("out/pwned");
+    w.agent(&format!(
+        "cd \"$FAKE_WORK\" && echo b > b.txt && git add b.txt && \
+         git -c user.name=a -c user.email=a@a commit -qm agent && echo edited > a.txt && \
+         echo report > REPORT.md && git config core.fsmonitor 'touch {}'\n{}",
+        marker.display(),
+        say(RESULT)
+    ));
+    let stats = w.path("out/stats.json");
+    let out = w.run(&["--clone", "--stats-file", stats.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stats = stats_of(&stats);
+    let branch = stats["branch"].as_str().expect("a branch").to_string();
+    assert!(branch.starts_with("sanduk/"), "{branch}");
+    assert_eq!(stats["kept"], Value::Null);
+
+    assert_eq!(git(&work, &format!("show {branch}:b.txt")), "b");
+    assert_eq!(git(&work, &format!("show {branch}:a.txt")), "edited");
+    assert_eq!(git(&work, &format!("rev-list --count HEAD..{branch}")), "2");
+    // The repository itself: its tree, its config, and the report delivered beside them.
+    assert_eq!(std::fs::read_to_string(work.join("a.txt")).unwrap(), "a\n");
+    assert_eq!(
+        std::fs::read_to_string(work.join("REPORT.md")).unwrap(),
+        "report\n"
+    );
+    git(&work, "status");
+    assert!(!marker.exists(), "host git ran the clone's fsmonitor");
+    assert!(
+        !std::fs::read_to_string(work.join(".git/config"))
+            .unwrap()
+            .contains("fsmonitor")
+    );
+
+    let calls = w.calls();
+    let agent = calls
+        .iter()
+        .find(|c| c[0] == "run" && c.iter().any(|a| a.contains("ANTHROPIC_API_KEY")))
+        .unwrap();
+    assert!(
+        !agent
+            .iter()
+            .any(|a| a.starts_with(&format!("{}:", work.display()))),
+        "the repository was mounted: {agent:?}"
+    );
+    assert_eq!(clones(&w), 0, "the clone outlived a fetched run");
+    assert_eq!(w.containers(), "");
+    assert_eq!(w.records(), 0);
+}
+
+/// A failed return step leaves the clone, the only copy of the agent's work, and names it.
+#[test]
+fn clone_keeps_the_copy_when_its_work_cannot_be_fetched() {
+    let w = World::new("clonekept");
+    repo(&w);
+    w.agent(&format!(
+        "cd \"$FAKE_WORK\" && echo b > b.txt && rm -rf .git\n{}",
+        say(RESULT)
+    ));
+    let stats = w.path("out/stats.json");
+    let out = w.run(&["--clone", "--stats-file", stats.to_str().unwrap()]);
+    assert!(out.status.success(), "{}", stderr(&out));
+    let stats = stats_of(&stats);
+    assert_eq!(stats["branch"], Value::Null);
+    let kept = PathBuf::from(stats["kept"].as_str().expect("a kept path"));
+    assert_eq!(std::fs::read_to_string(kept.join("b.txt")).unwrap(), "b\n");
+    assert!(
+        stderr(&out).contains(&kept.display().to_string()),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(w.records(), 0);
+}
+
+#[test]
+fn clone_refuses_a_dirty_tree_and_a_check_with_no_task() {
+    let w = World::new("clonerefuse");
+    let work = repo(&w);
+    std::fs::write(work.join("a.txt"), "changed\n").unwrap();
+    let out = w.run(&["--clone"]);
+    assert!(!out.status.success());
+    assert!(stderr(&out).contains("uncommitted"), "{}", stderr(&out));
+    assert!(
+        !w.calls().iter().any(|c| c[0] == "run"),
+        "a container started"
+    );
+
+    let path = w.work();
+    let out = w.sanduk(&[
+        "run",
+        "-w",
+        &path,
+        "--agent",
+        "claude",
+        "--provider",
+        "anthropic",
+        "--runtime",
+        "docker",
+        "--verify",
+        "true",
+        "--clone",
+    ]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("--clone needs a task"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(clones(&w), 0);
+}

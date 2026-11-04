@@ -15,12 +15,13 @@ use regex::Regex;
 
 use sanduk_container::{CONTAINER_PREFIX, ContainerSpec, Engine, Mount, Via, wait_for_gateway};
 
+use super::clone::{self, Clone};
 use super::{EngineArgs, ImageArgs};
 use crate::agent::launch::{self, Signals, launch};
 use crate::agent::{self, Agent, DEFAULT_AGENT, Endpoint, Options, Outcome, REPORT_NAME, Wiring};
 use crate::catalog::Origin;
 use crate::error::{Error, Result};
-use crate::preflight::{firewall_warning, validate_key};
+use crate::preflight::{firewall_warning, host_listener_warning, validate_key};
 use crate::providers::{DEFAULT_PROVIDER, Provider, Scheme, get_provider, parse_upstream};
 use crate::recipes::{self, Recipe, Rendered};
 use crate::relay::{Config, PING, Relay, Stats};
@@ -105,6 +106,11 @@ pub struct RunArgs {
     /// report or a stack trace resolves on the host
     #[arg(long)]
     pub work_at_host_path: bool,
+    /// Run on a clone of the -w repository, and fetch the agent's commits back into it as branch
+    /// sanduk/<run>, uncommitted edits included. The agent never writes the repository's .git.
+    /// -w must be a repository's top level with no uncommitted change to a tracked file
+    #[arg(long)]
+    pub clone: bool,
     /// Copy the agent's REPORT.md here after the run
     #[arg(short = 'o', long)]
     pub report: Option<PathBuf>,
@@ -964,7 +970,7 @@ impl Held {
     }
 }
 
-pub fn run(args: RunArgs) -> Result<i32> {
+pub fn run(mut args: RunArgs) -> Result<i32> {
     let mode = resolve_mode(&args)?;
     let engine = args.engine.engine()?;
     if args.oci_runtime.is_some() && !engine.kind().takes_oci_runtime() {
@@ -985,6 +991,11 @@ pub fn run(args: RunArgs) -> Result<i32> {
         && args.task_file.is_none()
         && let Some(command) = &args.verify
     {
+        if args.clone {
+            return Err(Error::new(
+                "--clone needs a task: --verify alone changes nothing to fetch back",
+            ));
+        }
         return check_only(&args, &mode, &engine, &sel, command);
     }
     let provider = sel.provider;
@@ -1003,6 +1014,20 @@ pub fn run(args: RunArgs) -> Result<i32> {
     }
 
     let workdir = resolve_path(&args.workdir)?;
+    let name = format!("{CONTAINER_PREFIX}{}", random_hex(8)?);
+    let cloned = if args.clone {
+        let run_id = name.strip_prefix(CONTAINER_PREFIX).unwrap_or(&name);
+        Some(Clone::plan(&workdir, run_id)?)
+    } else {
+        None
+    };
+    // The container's workdir. The report is still delivered to the repository.
+    let work = cloned
+        .as_ref()
+        .map_or_else(|| workdir.clone(), |c| c.copy.clone());
+    if cloned.is_some() && args.report.is_none() {
+        args.report = Some(workdir.join(REPORT_NAME));
+    }
     // Parsed before anything is acquired: a refused --mount after the holder was up left it behind.
     let dest = work_dest(&args, &workdir);
     let mounts = parse_mounts(&args.mount, &dest)?;
@@ -1023,7 +1048,6 @@ pub fn run(args: RunArgs) -> Result<i32> {
         }
     }
 
-    let name = format!("{CONTAINER_PREFIX}{}", random_hex(8)?);
     let signals = Signals::catch();
     let mut held = Held::default();
     let mut network = args.network.clone();
@@ -1046,7 +1070,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
             gateway = net.gateway;
             run_token = token(24)?;
             if !args.dry_run {
-                ensure_image(&engine, &args, &sel, &workdir, socket.as_ref())?;
+                ensure_image(&engine, &args, &sel, &work, socket.as_ref())?;
                 held.claim(engine.kind().name(), &name)?;
                 // Outlive the run: the holder going first takes the bridge, and the relay's
                 // address, with it.
@@ -1063,6 +1087,9 @@ pub fn run(args: RunArgs) -> Result<i32> {
                         "{gateway} never became bindable on this host.{}",
                         engine.kind().gateway_hint()
                     )));
+                }
+                if !mode.egress {
+                    host_listener_warning(&gateway);
                 }
                 let relay = start_relay(&args, &sel, &key, &run_token, &gateway, &name)?;
                 port = relay.port();
@@ -1104,7 +1131,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
             &wiring,
             command,
             &name,
-            &workdir,
+            &work,
             &dest,
             network.clone(),
             &mounts,
@@ -1120,7 +1147,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
                     &args,
                     &sel,
                     &format!("{name}-verify"),
-                    &workdir,
+                    &work,
                     &dest,
                     network.clone(),
                     &mounts,
@@ -1132,6 +1159,14 @@ pub fn run(args: RunArgs) -> Result<i32> {
             if mode.relayed {
                 println!("# proxy: {gateway} -> {api_url} ({})", provider.name);
             }
+            if let Some(c) = &cloned {
+                println!(
+                    "# clone: {} -> {}, returned as branch {}",
+                    c.origin.display(),
+                    c.copy.display(),
+                    c.branch
+                );
+            }
             println!(
                 "# container env: {}=<credential> {}={}",
                 wiring.key_env,
@@ -1142,13 +1177,16 @@ pub fn run(args: RunArgs) -> Result<i32> {
         }
         engine.require_run()?;
         if !mode.relayed {
-            ensure_image(&engine, &args, &sel, &workdir, socket.as_ref())?;
+            ensure_image(&engine, &args, &sel, &work, socket.as_ref())?;
         }
         // Not before the dry-run return, and not before the key check: until a run is about to
         // start, the previous report is still the only result there is.
-        std::fs::create_dir_all(&workdir)?;
+        match &cloned {
+            Some(c) => c.create()?,
+            None => std::fs::create_dir_all(&workdir)?,
+        }
         // Removed, not tested and removed: a test follows a symlink the last agent left.
-        match std::fs::remove_file(workdir.join(REPORT_NAME)) {
+        match std::fs::remove_file(work.join(REPORT_NAME)) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
             _ => {}
         }
@@ -1165,6 +1203,10 @@ pub fn run(args: RunArgs) -> Result<i32> {
         Ok(prepared) => prepared,
         Err(e) => {
             held.give_back(&engine);
+            // The agent has not run: the clone holds nothing of its.
+            if let Some(c) = &cloned {
+                c.remove();
+            }
             return Err(e);
         }
     };
@@ -1183,7 +1225,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
             mode.network
         ));
     }
-    note(&format!("{name} -> {}", workdir.display()));
+    note(&format!("{name} -> {}", work.display()));
     let started = Instant::now();
     let launched = launch(
         &sel.agent,
@@ -1245,7 +1287,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
             &args,
             &sel,
             &format!("{name}-verify"),
-            &workdir,
+            &work,
             &dest,
             network.clone(),
             &mounts,
@@ -1256,6 +1298,24 @@ pub fn run(args: RunArgs) -> Result<i32> {
         let (verified, gone) = verify(&engine, held.record.as_mut(), &spec, command, left);
         verify_gone = gone;
         verified
+    });
+    // Before the holder goes: the return step uses the run's network.
+    let mut return_gone = true;
+    let returned = cloned.as_ref().map(|c| {
+        let spec = verify_spec(
+            &args,
+            &sel,
+            &format!("{name}-return"),
+            &work,
+            &dest,
+            network.clone(),
+            &mounts,
+            user.clone(),
+            &c.script(),
+        );
+        let (fetched, gone) = return_clone(&engine, held.record.as_mut(), &spec, c);
+        return_gone = gone;
+        fetched
     });
     let mut holder_gone = true;
     if let Some(holder) = held.holder.take()
@@ -1269,6 +1329,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
         && gone
         && holder_gone
         && verify_gone
+        && return_gone
     {
         record.release();
     }
@@ -1293,8 +1354,79 @@ pub fn run(args: RunArgs) -> Result<i32> {
     if let Some(o) = &outcome {
         note(&o.stats);
     }
-    let extra = extra(&mode, relay_stats, verified.as_ref());
-    collect_report(&args, &workdir, outcome.as_ref(), rc, &failure, extra)
+    let mut extra = extra(&mode, relay_stats, verified.as_ref());
+    if let (Some(c), Some(fetched)) = (&cloned, &returned) {
+        extra["branch"] = fetched.clone().ok().flatten().into();
+        extra["kept"] = fetched
+            .is_err()
+            .then(|| c.copy.display().to_string())
+            .into();
+    }
+    let code = collect_report(&args, &work, outcome.as_ref(), rc, &failure, extra);
+    // Kept when the fetch failed: the clone is then the only copy of the agent's work.
+    if let (Some(c), Some(Ok(_))) = (&cloned, &returned) {
+        c.remove();
+    }
+    code
+}
+
+/// How long the return step may take. Outside --timeout: the agent's work is at stake.
+const RETURN_SECONDS: u64 = 300;
+
+/// `--clone`: bundles the clone's commits in a container, then fetches them on the host. The
+/// branch, `None` when the agent changed nothing; and whether the container is gone.
+fn return_clone(
+    engine: &Engine,
+    record: Option<&mut Run>,
+    spec: &ContainerSpec,
+    c: &Clone,
+) -> (std::result::Result<Option<String>, ()>, bool) {
+    let keep = |why: &str| {
+        note(&format!(
+            "--clone: {why}; the agent's work is kept in {}",
+            c.copy.display()
+        ));
+        Err(())
+    };
+    if Signals::caught().is_some() {
+        return (keep("interrupted before the return step"), true);
+    }
+    if let Some(record) = record
+        && let Err(e) = record.add(&spec.name)
+    {
+        return (keep(&e.message), true);
+    }
+    let checked = launch::check(&engine.run_argv(spec), Duration::from_secs(RETURN_SECONDS));
+    let gone = match engine.destroy(&spec.name) {
+        Ok(()) => true,
+        Err(e) => {
+            note(&e.0);
+            false
+        }
+    };
+    let fetched = match checked.map(|c| c.code) {
+        Ok(Some(0)) => match c.fetch() {
+            Ok(count) => {
+                note(&format!(
+                    "--clone: {count} commit(s) -> branch {} in {}",
+                    c.branch,
+                    c.origin.display()
+                ));
+                Ok(Some(c.branch.clone()))
+            }
+            Err(e) => keep(&e.message),
+        },
+        Ok(Some(clone::UNCHANGED)) => {
+            note("--clone: the agent changed nothing; no branch");
+            Ok(None)
+        }
+        Ok(Some(code)) => keep(&format!(
+            "the return step failed (exit {code}); is git in the image?"
+        )),
+        Ok(None) => keep("the return step did not finish"),
+        Err(e) => keep(&e.message),
+    };
+    (fetched, gone)
 }
 
 /// `--verify` with no task: the check alone, in the container a run with the same flags would use,

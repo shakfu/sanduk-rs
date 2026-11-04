@@ -1,5 +1,6 @@
 //! The command line: parse flags, wire the pieces, tear everything down.
 
+mod clone;
 mod run;
 
 use std::ffi::OsString;

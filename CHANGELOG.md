@@ -17,6 +17,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `--stats-file` also records `mode`, the relay's `requests`, `rejected`, `spent` and `unpriced` as numbers, and `verify`: `command`, `exit`, `ok`, `seconds`, `timed_out`, `error`.
 
+- A sealed run on Linux warns when a host TCP port listens on every address. Measured on Docker 29.9.3: an internal network blocks the internet, DNS, cloud metadata and the host's LAN address, but the gateway is a host address, so such a service answers the container past the relay. A warning over a refusal: most hosts run `sshd` on `0.0.0.0`, and a refusal would stop every run. `make live` now probes all five cases. See [docs/dev/tsk-tsk.md](docs/dev/tsk-tsk.md).
+
+- `run --clone` runs the agent on a clone of the `-w` repository and fetches its commits back as branch `sanduk/<run>`; edits it left uncommitted are committed first. With the repository bind-mounted, the agent can write `.git/config`, and a `core.fsmonitor` there runs on the host's next `git status`, before any review. The commits return as a git bundle made inside a container, so host git never reads the clone's config or hooks. A failed return keeps the clone and names it in `--stats-file` as `kept`; `branch` names the branch. Opt-in: the clone costs a copy of the repository per run, and refuses a tree with uncommitted changes to tracked files. pma does not pass it yet, so its runs still mount the worktree; making `--clone` its default needs a change in pma.
+
+  ```sh
+  sanduk run "fix the parser" -w repo --clone --mode sealed --stats-file s.json
+  ```
+
 ### Fixed
 
 - A killed `run` has its containers deleted when it dies, not when the next `run` starts. SIGKILL runs no teardown, and the engine's CLI runs in its own process group, so the agent's container kept running with the worktree mounted until some later run's sweep. A caller that kills sanduk's process group, as pma does at its deadline, left it running every time. Each run now starts `sanduk reap` in its own process group, blocked on a pipe the run holds; the pipe closing, at teardown or at death, starts the delete. A detached reaper over a container-side watchdog: the engine's CLI and the image stay unchanged, and every engine gets it.

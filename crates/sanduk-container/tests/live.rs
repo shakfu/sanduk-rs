@@ -114,6 +114,110 @@ fn a_network_comes_up_is_listed_and_goes_away() {
     assert_eq!(engine.network_info(&name), None);
 }
 
+/// `(label, host, port)`. `dns` with no port is a name lookup.
+type Target = (&'static str, String, u16);
+
+/// Which of `targets` a container on `network` connects to, by label.
+fn reached(engine: &Engine, network: &str, targets: &[Target]) -> Vec<(&'static str, bool)> {
+    let script = targets
+        .iter()
+        .map(|(label, host, port)| {
+            let test = if *port == 0 {
+                format!("nslookup {host}")
+            } else {
+                format!("nc -z -w 2 {host} {port}")
+            };
+            format!(
+                "if timeout 4 {test} >/dev/null 2>&1; then echo {label}=1; else echo {label}=0; fi"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    let spec = ContainerSpec {
+        network: Some(network.into()),
+        entrypoint: Some("sh".into()),
+        command: vec!["-c".into(), script],
+        ..ContainerSpec::new(unique("probe"), image())
+    };
+    let out = run(engine, &spec);
+    engine.destroy(&spec.name).unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    targets
+        .iter()
+        .map(|(label, ..)| {
+            let line = stdout.lines().find(|l| l.starts_with(&format!("{label}=")));
+            (
+                *label,
+                line.expect("every target answers") == format!("{label}=1"),
+            )
+        })
+        .collect()
+}
+
+/// This host's address on its default route. Connecting a UDP socket sends nothing.
+fn lan_address() -> String {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    s.connect("1.1.1.1:80").unwrap();
+    s.local_addr().unwrap().ip().to_string()
+}
+
+/// What `--mode sealed` claims: no route off the host. Probes from an internal network, with a
+/// routable one as the control, so a blocked result is not an offline host. See
+/// docs/dev/tsk-tsk.md.
+#[test]
+#[ignore]
+fn a_sealed_container_reaches_no_address_off_the_host() {
+    let engine = engine();
+    let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut done = Vec::new();
+    let mut probe = |internal: bool, targets: &dyn Fn(&str) -> Vec<Target>| {
+        let name = unique(if internal { "sealed" } else { "open" });
+        let (network, _) = engine.ensure_network(&name, internal).unwrap();
+        let holder = engine.hold_network_up(&name, &image(), 120).unwrap();
+        let on_host = wait_for_gateway(&network.gateway, Duration::from_secs(30));
+        let result = reached(&engine, &name, &targets(&network.gateway));
+        if let Some(holder) = &holder {
+            engine.destroy(holder).unwrap();
+        }
+        assert!(engine.delete_network(&name));
+        done.push(on_host);
+        result
+    };
+
+    let control = probe(false, &|_| vec![("internet", "1.1.1.1".into(), 443)]);
+    assert_eq!(
+        control,
+        [("internet", true)],
+        "the control found no route out"
+    );
+
+    let lan = lan_address();
+    let sealed = probe(true, &|gateway| {
+        vec![
+            ("internet", "1.1.1.1".into(), 443),
+            ("metadata", "169.254.169.254".into(), 80),
+            ("dns", "example.com".into(), 0),
+            ("lan", lan.clone(), port),
+            ("gateway", gateway.to_string(), port),
+        ]
+    });
+    drop(listener);
+    for (label, got) in &sealed[..4] {
+        assert!(!got, "a sealed container reached {label}");
+    }
+    // The known gap: the gateway is a host address, so a listener on every address answers.
+    // When a fix lands, this flips. With the bridge in a VM (Docker Desktop) it is not this host.
+    if done[1] {
+        assert_eq!(
+            sealed[4],
+            ("gateway", true),
+            "the gap closed: update docs/dev/tsk-tsk.md"
+        );
+    }
+}
+
 #[test]
 #[ignore]
 fn an_image_that_was_pulled_exists_and_a_made_up_one_does_not() {

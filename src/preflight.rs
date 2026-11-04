@@ -28,6 +28,45 @@ pub fn firewall_entries(listing: &str) -> Vec<(String, bool)> {
     entries
 }
 
+/// Ports in LISTEN on every address, from the text of `/proc/net/tcp` or `/proc/net/tcp6`.
+pub fn wildcard_listeners(table: &str) -> Vec<u16> {
+    table
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let (addr, port) = fields.get(1)?.split_once(':')?;
+            let listening = fields.get(3) == Some(&"0A");
+            let wildcard = addr.bytes().all(|b| b == b'0');
+            (listening && wildcard)
+                .then(|| u16::from_str_radix(port, 16).ok())
+                .flatten()
+        })
+        .collect()
+}
+
+/// Warns that a sealed container reaches host services bound to every address, at `gateway`.
+/// Measured on Linux Docker (docs/dev/tsk-tsk.md); elsewhere `/proc` is absent and this is silent.
+pub fn host_listener_warning(gateway: &str) {
+    let mut ports: Vec<u16> = ["/proc/net/tcp", "/proc/net/tcp6"]
+        .iter()
+        .filter_map(|p| std::fs::read_to_string(p).ok())
+        .flat_map(|t| wildcard_listeners(&t))
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    if ports.is_empty() {
+        return;
+    }
+    let list: Vec<String> = ports.iter().map(u16::to_string).collect();
+    eprintln!(
+        "sanduk: WARNING host TCP ports {} listen on every address.\n  \
+         The sealed container reaches them at {gateway}, past the relay. \
+         Bind them to 127.0.0.1 to keep them out of its reach.",
+        list.join(", ")
+    );
+}
+
 /// Warns when the macOS application firewall blocks this binary. A blocked binary drops
 /// container-to-host connections with no error, so the agent's first call to the relay hangs.
 pub fn firewall_warning() {
@@ -100,6 +139,22 @@ pub fn validate_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wildcard_listeners_are_listening_sockets_on_every_address() {
+        let tcp = "  sl  local_address rem_address   st tx_queue rx_queue\n\
+                   0: 00000000:0016 00000000:0000 0A 00000000:00000000\n\
+                   1: 0100007F:0CEA 00000000:0000 0A 00000000:00000000\n\
+                   2: 00000000:1F90 0100007F:9C40 01 00000000:00000000\n\
+                   3: 010012AC:A1B2 00000000:0000 0A 00000000:00000000\n";
+        // 22 on 0.0.0.0. Not: 127.0.0.1:3306, an established socket, 172.18.0.1 (the relay's kind).
+        assert_eq!(wildcard_listeners(tcp), [22]);
+        let tcp6 = "  sl  local_address remote_address st\n\
+                    0: 00000000000000000000000000000000:1F90 00000000000000000000000000000000:0000 0A\n\
+                    1: 00000000000000000000000001000000:0277 00000000000000000000000000000000:0000 0A\n";
+        assert_eq!(wildcard_listeners(tcp6), [8080]);
+        assert!(wildcard_listeners("").is_empty());
+    }
 
     #[test]
     fn firewall_entries_pair_paths_with_state() {
